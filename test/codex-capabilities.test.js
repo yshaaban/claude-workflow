@@ -464,7 +464,7 @@ test('workflow long context gives Claude the truthful Codex usable and compact w
       assert.equal(workflow.config.codex.autoCompactTokenLimit, 0);
       assert.equal(clientEnv.CLAUDE_CODE_MAX_CONTEXT_TOKENS, '828400');
       assert.equal(clientEnv.CLAUDE_CODE_AUTO_COMPACT_WINDOW, '784800');
-      assert.equal(clientEnv.CLAUDE_CODE_EFFORT_LEVEL, 'max');
+      assert.equal(clientEnv.CLAUDE_CODE_EFFORT_LEVEL, null);
       assert.equal(clientEnv.ANTHROPIC_CUSTOM_MODEL_OPTION, 'codex-astra');
       assert.equal(clientEnv.ANTHROPIC_CUSTOM_MODEL_OPTION_NAME, 'Codex Astra');
       assert.equal(

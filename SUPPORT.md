@@ -105,6 +105,10 @@ relevant error. Never attach credentials or an unredacted gateway env file.
 
 ## Known boundaries
 
+- Native Ultracode requires Claude's dynamic workflows and xhigh support for
+  the model and organization. Codex route effort is independent. Upgrade
+  v0.3.0 installations to v0.3.1 or newer and start a new session to clear the
+  old `CLAUDE_CODE_EFFORT_LEVEL=max` pin. Kimi/Qwen retain fixed client effort.
 - Codex-routed image blocks are rejected rather than silently discarded.
 - A pending dynamic tool call occupies one bounded pool slot until its result,
   its independent timeout, or daemon restart.

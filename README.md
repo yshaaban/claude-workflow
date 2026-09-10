@@ -39,13 +39,13 @@ installing under WSL.
 
 ## Getting started
 
-Install release `v0.3.0` from the canonical GitHub repository. npm 12 blocks
+Install release `v0.3.1` from the canonical GitHub repository. npm 12 blocks
 Git dependencies by default, so the command grants access only to the package
 named on the command line:
 
 ```bash
 npm install --global --allow-git=root \
-  git+https://github.com/yshaaban/claude-workflow.git#v0.3.0
+  git+https://github.com/yshaaban/claude-workflow.git#v0.3.1
 ```
 
 Use a user-owned npm prefix, nvm, Volta, or another Node version manager if a
@@ -154,6 +154,23 @@ Astra is the default for capability-focused work. `astra` selects `gpt-6-astra`;
 alternative and Luna prioritizes latency and cost. Changing tiers never invents
 an unavailable model such as `gpt-6-terra`. You may also pass a full model ID
 available to your Codex workspace.
+
+### Native Ultracode mode
+
+With Fable as the coordinator, run `/effort ultracode` inside Claude Code.
+This selects native xhigh reasoning with dynamic workflow orchestration.
+Enable dynamic workflows in `/config` if needed. Availability depends on
+Claude Code, the selected model, and your organization's effort limits.
+
+Codex agents keep their own configured effort. For example, an Ultracode
+coordinator can delegate to Astra/max agents. `claude-workflow config --effort`
+controls the Codex route, not the coordinator's native mode. To set a native
+effort level at launch, use `claude-workflow -- --effort xhigh`.
+
+Workflow clears stale `CLAUDE_CODE_EFFORT_LEVEL` overrides for Anthropic and
+Codex routes without editing persistent Claude settings. Kimi and Qwen retain
+their required provider-specific client effort. See
+[native effort and Ultracode](docs/UPSTREAM_COMPATIBILITY.md#native-effort-and-ultracode).
 
 ### Codex context profiles
 
@@ -559,6 +576,9 @@ See [SECURITY.md](SECURITY.md) for reporting and the full security model.
 
 ## Troubleshooting
 
+- **`max` overrides `/effort ultracode`:** upgrade to v0.3.1 or newer, run
+  `claude-workflow setup`, and start a new session. Version 0.3.0 injected the
+  override at launch, so unsetting it in the parent shell alone did not help.
 Start with:
 
 ```bash
@@ -628,7 +648,7 @@ Reinstall this release, then run the setup checks and upgrade maintenance:
 
 ```bash
 npm install --global --allow-git=root \
-  git+https://github.com/yshaaban/claude-workflow.git#v0.3.0
+  git+https://github.com/yshaaban/claude-workflow.git#v0.3.1
 claude-workflow setup
 ```
 

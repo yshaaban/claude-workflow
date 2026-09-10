@@ -1,6 +1,6 @@
 {
   "name": "@onetool/claude-workflow",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "description": "Claude Code launcher with Opus, Fable, Codex, Kimi, and Qwen main routes plus Codex-backed workflow agents.",
   "type": "module",
   "bin": {

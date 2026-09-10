@@ -413,7 +413,7 @@ test('Kimi client settings follow only the resolved main route', async function 
         },
       }),
     },
-    async function verifyDormantRouteDoesNotChangeOpus() {
+    async function verifyDormantRouteDoesNotPinNativeEffort() {
       const workflow = buildWorkflowGatewayConfig();
       assert.notEqual(workflow.config.sharedSecret, '');
       assert.equal(
@@ -429,7 +429,7 @@ test('Kimi client settings follow only the resolved main route', async function 
       assert.equal(workflow.mainModelId, 'claude-fable-5-1');
       assert.equal(clientEnv.CLAUDE_CODE_MAX_CONTEXT_TOKENS, '828400');
       assert.equal(clientEnv.CLAUDE_CODE_AUTO_COMPACT_WINDOW, '784800');
-      assert.equal(clientEnv.CLAUDE_CODE_EFFORT_LEVEL, 'max');
+      assert.equal(clientEnv.CLAUDE_CODE_EFFORT_LEVEL, null);
       assert.equal(clientEnv.CLAUDE_CODE_DISABLE_NONSTREAMING_FALLBACK, '1');
       assert.equal(clientEnv.ANTHROPIC_CUSTOM_MODEL_OPTION, workflow.subagentModelId);
       assert.match(clientEnv.ANTHROPIC_CUSTOM_MODEL_OPTION_NAME, /^Codex /u);
@@ -439,7 +439,7 @@ test('Kimi client settings follow only the resolved main route', async function 
       );
       const serialized = serializeWorkflowEnvironment(clientEnv);
       assert.match(serialized, /export CLAUDE_CODE_AUTO_COMPACT_WINDOW='784800'/u);
-      assert.match(serialized, /export CLAUDE_CODE_EFFORT_LEVEL='max'/u);
+      assert.match(serialized, /^unset CLAUDE_CODE_EFFORT_LEVEL\b/mu);
       assert.match(serialized, /export CLAUDE_CODE_MAX_CONTEXT_TOKENS='828400'/u);
     }
   );

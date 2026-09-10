@@ -1785,6 +1785,65 @@ test(
   }
 );
 
+test('native Claude effort flags stay independent of the configured Codex effort',
+  { skip: process.platform === 'win32' }, async function (t) {
+    const root = await temporaryDirectory(t, 'claude-workflow-native-effort-');
+    const home = path.join(root, 'home');
+    await fsp.mkdir(home);
+    const bin = await installFakeNativeTools(root);
+    const argsFile = path.join(root, 'claude args.txt');
+    const settingsFile = path.join(root, 'private settings.json');
+    const envFile = path.join(root, 'claude env.txt');
+    const env = isolatedEnvironment(home, {
+      PATH: `${bin}${path.delimiter}${process.env.PATH}`,
+      FAKE_CLAUDE_ARGS_FILE: argsFile,
+      FAKE_CLAUDE_SETTINGS_CAPTURE_FILE: settingsFile,
+      FAKE_CLAUDE_ENV_FILE: envFile,
+      CLAUDE_CODE_EFFORT_LEVEL: 'max',
+    });
+    for (const main of ['fable', 'opus', 'codex']) {
+      const configured = runCli(['config', '--main', main, '--agents', 'astra', '--effort', 'max'], { env });
+      assert.equal(configured.status, 0, configured.stderr);
+      for (const options of [['--effort', 'xhigh'], ['--effort=high']]) {
+        const result = runCli(['--', ...options], { env });
+        assert.equal(result.status, 0, result.stderr);
+        const args = (await fsp.readFile(argsFile, 'utf8')).trim().split('\n');
+        assert.deepEqual(args.slice(-options.length), options);
+        const settings = JSON.parse(await fsp.readFile(settingsFile, 'utf8'));
+        assert.equal(settings.env.CLAUDE_CODE_EFFORT_LEVEL, '');
+        assert.equal((await fsp.readFile(envFile, 'utf8')).split('\n')[3], 'unset');
+      }
+      const summary = runCli(['config', '--json'], { env });
+      assert.equal(summary.status, 0, summary.stderr);
+      assert.equal(JSON.parse(summary.stdout).agents.effort, 'max');
+    }
+  });
+
+test('provider-required client effort cannot be replaced by a native effort flag',
+  { skip: process.platform === 'win32' }, async function (t) {
+    const root = await temporaryDirectory(t, 'claude-workflow-provider-effort-');
+    const home = path.join(root, 'home');
+    await fsp.mkdir(home);
+    const bin = await installFakeNativeTools(root);
+    const argsFile = path.join(root, 'must-not-launch.txt');
+    const env = isolatedEnvironment(home, {
+      PATH: `${bin}${path.delimiter}${process.env.PATH}`,
+      FAKE_CLAUDE_ARGS_FILE: argsFile,
+      KIMI_API_KEY: 'test-kimi-effort-key',
+      QWEN_API_KEY: 'sk-sp-test-qwen-effort-key',
+    });
+    for (const main of ['kimi', 'qwen']) {
+      const configured = runCli(['config', '--main', main], { env });
+      assert.equal(configured.status, 0, configured.stderr);
+      for (const options of [['--effort', 'high'], ['--effort=xhigh']]) {
+        const result = runCli(['--', ...options], { env });
+        assert.equal(result.status, 1);
+        assert.match(result.stderr, /--effort is managed.*provider preset/u);
+      }
+    }
+    await assert.rejects(fsp.access(argsFile));
+  });
+
 test('launcher rejects background Claude lifecycle flags before dispatch', function () {
   for (const args of [
     ['--', '--background'],
@@ -2075,7 +2134,7 @@ test(
       'unset',
       'unset',
       'claude-fable-5-1',
-      'max',
+      'unset',
       '784800',
       '828400',
       'unset',
@@ -2108,7 +2167,7 @@ test(
       replaceBuiltInOptions: true,
     });
     assert.equal(privateSettings.env.ANTHROPIC_MODEL, 'claude-fable-5-1');
-    assert.equal(privateSettings.env.CLAUDE_CODE_EFFORT_LEVEL, 'max');
+    assert.equal(privateSettings.env.CLAUDE_CODE_EFFORT_LEVEL, '');
     assert.equal(privateSettings.env.CLAUDE_CODE_AUTO_COMPACT_WINDOW, '784800');
     assert.equal(privateSettings.env.CLAUDE_CODE_MAX_CONTEXT_TOKENS, '828400');
     assert.equal(privateSettings.env.ANTHROPIC_CUSTOM_MODEL_OPTION, 'codex-astra');

@@ -810,17 +810,12 @@ export function buildWorkflowClientEnv(
       : null;
   }
 
-  const clientEffort = routeReasoningEffort(
-    routeProvider(mainRoute, '') === 'codex' ? mainRoute : subagentRoute,
-    DEFAULT_SUBAGENT_REASONING_EFFORT
-  );
-  if (clientEffort) {
-    // Claude's effort enum is narrower than Codex's. Unsupported values are
-    // silently ignored by Claude, so translate only the client preference;
-    // the selected Codex route retains its exact upstream effort.
-    clientEnv.CLAUDE_CODE_EFFORT_LEVEL =
-      clientEffort === 'ultra' ? 'max' : clientEffort === 'minimal' ? 'low' : clientEffort;
-  }
+  // Keep Claude's session effort independent of the Codex route. An effort
+  // environment variable overrides /effort, including ultracode's xhigh mode.
+  // Leave the managed null above intact so stale shell/settings pins are
+  // cleared. Do not use "auto" or "unset": Claude treats those as overrides
+  // too. Codex still receives its exact configured route effort. Kimi/Qwen
+  // retain their provider-specific client requirements below.
   // Claude may fall back from a broken stream to a non-streaming retry. A tool
   // turn is not safely replayable, so keep one intended boundary to one
   // provider request and surface the transport failure instead.

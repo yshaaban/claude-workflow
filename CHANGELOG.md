@@ -1,5 +1,24 @@
 # Changelog
 
+## 0.3.1 - 2026-09-10
+
+### Fixed
+
+- Native `/effort ultracode` is no longer overridden by the Codex agent effort.
+  Anthropic and Codex launches clear stale `CLAUDE_CODE_EFFORT_LEVEL` values
+  from the child environment and private settings. Persistent Claude settings
+  remain untouched, and Codex agents keep their configured upstream effort.
+- Native `--effort` launch options are accepted after `--`. Kimi and Qwen keep
+  their required provider-specific client effort and reject conflicting flags.
+
+### Added
+
+- Account-free installed-Claude tests for Ultracode activation, independent
+  coordinator/agent effort, and stale shell/settings cleanup. Verified with
+  Claude Code 2.1.261 and 2.1.267.
+- Setup and troubleshooting guidance distinguishing native Ultracode mode from
+  Codex reasoning levels.
+
 ## 0.3.0 - 2026-09-05
 
 ### Changed

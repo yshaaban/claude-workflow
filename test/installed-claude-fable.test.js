@@ -223,9 +223,11 @@ async function nativeFixture(t, reply, options = {}) {
       [CLAUDE_TERMINAL_TITLE_ENV_NAME]: '1',
       NO_PROXY: '127.0.0.1',
       no_proxy: '127.0.0.1',
+      ...options.inheritedEnv,
     });
     for (const [name, value] of Object.entries(clientEnv)) {
-      if (value !== null && value !== undefined) env[name] = String(value);
+      if (value === null || value === undefined) delete env[name];
+      else env[name] = String(value);
     }
     const settings = createPrivateClaudeSettingsOverride(
       buildClaudeSettingsOverrideEnvironment(clientEnv, env),
@@ -239,6 +241,7 @@ async function nativeFixture(t, reply, options = {}) {
     }));
     return {
       clientEnv, codexLog, config, fixtureFile, paths, requests, subagentModelId,
+      userSettingsPath: path.join(env.CLAUDE_CONFIG_DIR, 'settings.json'),
       run(prompt) {
         return runClaude([
           '--print', '--output-format', 'json', '--model', mainModelId,
@@ -309,7 +312,7 @@ for (const [category, expectedModel] of [['bio', 'claude-opus-5'], ['cyber', 'cl
     });
 }
 
-test('installed Claude keeps an explicitly Opus-pinned subagent on Codex while native fallback remains available',
+test('installed Claude keeps an explicitly Opus-pinned subagent at Codex max while the coordinator uses xhigh',
   { skip: CLAUDE_CLI.skip || (process.platform === 'win32' && 'requires a POSIX executable fixture') }, async function (t) {
     const agentCall = {
       type: 'tool_use', id: 'toolu_forced_agent', name: 'Agent',
@@ -324,6 +327,7 @@ test('installed Claude keeps an explicitly Opus-pinned subagent on Codex while n
         requests.length === 1 ? 'tool_use' : 'end_turn');
     }, {
       fakeCodex: true,
+      effort: 'xhigh',
       tools: 'Agent,Read',
       agents: { 'opus-pinned': { description: 'Check the configured model.', prompt: 'Return the requested test marker.', model: 'opus' } },
     });
@@ -332,6 +336,7 @@ test('installed Claude keeps an explicitly Opus-pinned subagent on Codex while n
     assert.equal(result.signal, null, result.stderr || result.stdout);
     assert.deepEqual(fixture.requests.map((request) => request.model), [MODEL, MODEL],
       'the Opus-pinned agent must not make a third Anthropic request');
+    assert.deepEqual(fixture.requests.map((request) => request.output_config?.effort), ['xhigh', 'xhigh']);
     const resultBlocks = fixture.requests[1].messages.flatMap((message) => Array.isArray(message.content) ? message.content : []);
     const resultBlock = resultBlocks.find((block) => block.type === 'tool_result' && block.tool_use_id === agentCall.id);
     assert.ok(resultBlock);
@@ -360,15 +365,47 @@ test('installed Claude preserves refusals that have no native category fallback'
     assert.equal(fixture.requests.length, 1, 'no fallback is invented for an unmapped category');
   });
 
+test('installed Claude can enable ultracode without a workflow effort override',
+  { skip: CLAUDE_CLI.skip }, async function (t) {
+    const fixture = await nativeFixture(t, (response, body) => {
+      respondWithMessage(response, body, [{ type: 'text', text: RESULT }], 'end_turn');
+    }, {
+      effort: null,
+      inheritedEnv: { CLAUDE_CODE_EFFORT_LEVEL: 'max' },
+      settings: { enableWorkflows: true, env: { CLAUDE_CODE_EFFORT_LEVEL: 'max' } },
+    });
+    const before = await fsp.readFile(fixture.userSettingsPath, 'utf8');
+    const result = await fixture.run('/effort ultracode');
+    assert.equal(result.status, 0, result.stderr || result.stdout);
+    assert.doesNotMatch(result.stdout + result.stderr, /CLAUDE_CODE_EFFORT_LEVEL=.*overrides/u);
+    assert.match(result.stdout, /Set effort level to ultracode/u);
+    assert.equal(fixture.requests.length, 0, 'the native effort command needs no inference');
+    assert.equal(resolveModelRoute(fixture.subagentModelId, fixture.config).reasoningEffort, 'max');
+    assert.equal(await fsp.readFile(fixture.userSettingsPath, 'utf8'), before);
+  });
+
+test('installed Claude honors a native saved effort without adopting the Codex effort',
+  { skip: CLAUDE_CLI.skip }, async function (t) {
+    const fixture = await nativeFixture(t, (response, body) => {
+      respondWithMessage(response, body, [{ type: 'text', text: RESULT }], 'end_turn');
+    }, { effort: null, settings: { effortLevel: 'high' } });
+    const result = await fixture.run(`Reply with exactly ${RESULT}.`);
+    assert.equal(result.status, 0, result.stderr || result.stdout);
+    assert.equal(fixture.requests.length, 1);
+    assert.equal(fixture.requests[0].output_config?.effort, 'high');
+    assert.equal(resolveModelRoute(fixture.subagentModelId, fixture.config).reasoningEffort, 'max');
+  });
+
 for (const [codexEffort, claudeEffort, extra] of [
-  ['ultra', 'max', {}],
+  ['max', 'xhigh', {}],
+  ['ultra', 'high', {}],
   ['minimal', 'low', { ULTRATHINK_GATEWAY_SUBAGENT_UPSTREAM_MODEL: 'gpt-custom', ULTRATHINK_GATEWAY_CODEX_MODEL: 'gpt-custom' }],
 ]) {
-  test(`installed Claude maps Codex ${codexEffort} to native Fable ${claudeEffort} without changing the Codex route`,
+  test(`installed Claude keeps native Fable ${claudeEffort} independent of Codex ${codexEffort}`,
     { skip: CLAUDE_CLI.skip }, async function (t) {
     const fixture = await nativeFixture(t, (response, body) => {
       respondWithMessage(response, body, [{ type: 'text', text: RESULT }], 'end_turn');
-    }, { effort: null, workflowEnv: { ULTRATHINK_GATEWAY_SUBAGENT_REASONING_EFFORT: codexEffort, ...extra } });
+    }, { effort: claudeEffort, workflowEnv: { ULTRATHINK_GATEWAY_SUBAGENT_REASONING_EFFORT: codexEffort, ...extra } });
     const result = await fixture.run(`Reply with exactly ${RESULT}.`);
     assert.equal(result.status, 0, result.stderr || result.stdout);
     assert.equal(fixture.requests.length, 1);
@@ -434,25 +471,30 @@ test('forced agent routing is managed in settings and restored by session and sh
     const { config, mainModelId, subagentModelId } = workflowForTest();
     const clientEnv = buildWorkflowClientEnv(config, 'http://127.0.0.1:4318', subagentModelId, mainModelId);
     const settingsEnv = buildClaudeSettingsOverrideEnvironment(clientEnv, clientEnv);
+    assert.equal(clientEnv.CLAUDE_CODE_EFFORT_LEVEL, null);
+    assert.equal(settingsEnv.CLAUDE_CODE_EFFORT_LEVEL, '');
     assert.equal(settingsEnv.CLAUDE_CODE_SUBAGENT_MODEL_FORCE, '1');
     assert.equal(settingsEnv.ANTHROPIC_DEFAULT_OPUS_MODEL, 'claude-opus-5');
     const overlay = serializeWorkflowEnvironment({
       CLAUDE_CODE_SUBAGENT_MODEL_FORCE: '1',
       ANTHROPIC_DEFAULT_OPUS_MODEL: 'claude-opus-5',
+      CLAUDE_CODE_EFFORT_LEVEL: null,
     });
-    const capture = 'const values = Object.fromEntries(Object.entries(process.env).filter(([key]) => /^(CLAUDE_CODE_SUBAGENT_MODEL_FORCE|ANTHROPIC_DEFAULT_OPUS_MODEL|CLAUDE_WORKFLOW_GATEWAY_)/.test(key))); process.stdout.write(JSON.stringify(values));';
+    const capture = 'const values = Object.fromEntries(Object.entries(process.env).filter(([key]) => /^(CLAUDE_CODE_EFFORT_LEVEL|CLAUDE_CODE_SUBAGENT_MODEL_FORCE|ANTHROPIC_DEFAULT_OPUS_MODEL|CLAUDE_WORKFLOW_GATEWAY_)/.test(key))); process.stdout.write(JSON.stringify(values));';
     const probe = [
       overlay,
       'test "$CLAUDE_CODE_SUBAGENT_MODEL_FORCE" = 1 || exit 10',
+      'test "${CLAUDE_CODE_EFFORT_LEVEL+x}" != x || exit 13',
       '"$1" -e "$2"',
       managedWorkflowEnvironmentCleanupShell(),
       'test "$CLAUDE_CODE_SUBAGENT_MODEL_FORCE" = 0 || exit 11',
       'test "$ANTHROPIC_DEFAULT_OPUS_MODEL" = user-opus || exit 12',
+      'test "$CLAUDE_CODE_EFFORT_LEVEL" = high || exit 14',
     ].join('\n');
     const result = spawnSync('bash', ['--noprofile', '--norc', '-c', probe, '_', process.execPath, capture], {
-      encoding: 'utf8', env: isolatedEnvironment({ CLAUDE_CODE_SUBAGENT_MODEL_FORCE: '0', ANTHROPIC_DEFAULT_OPUS_MODEL: 'user-opus' }),
+      encoding: 'utf8', env: isolatedEnvironment({ CLAUDE_CODE_EFFORT_LEVEL: 'high', CLAUDE_CODE_SUBAGENT_MODEL_FORCE: '0', ANTHROPIC_DEFAULT_OPUS_MODEL: 'user-opus' }),
     });
     assert.equal(result.status, 0, result.stderr || result.stdout);
     const restored = environmentWithoutManagedWorkflowEnvironment(JSON.parse(result.stdout));
-    assert.deepEqual(restored, { CLAUDE_CODE_SUBAGENT_MODEL_FORCE: '0', ANTHROPIC_DEFAULT_OPUS_MODEL: 'user-opus' });
+    assert.deepEqual(restored, { CLAUDE_CODE_EFFORT_LEVEL: 'high', CLAUDE_CODE_SUBAGENT_MODEL_FORCE: '0', ANTHROPIC_DEFAULT_OPUS_MODEL: 'user-opus' });
   });

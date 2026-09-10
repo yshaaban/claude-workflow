@@ -32,12 +32,38 @@ maximum. A marketing label or `[1m]` suffix cannot enlarge it.
 Codex's catalog also advertises `ultra` reasoning for Astra; its API model
 reference lists levels only through `max`. Workflow validates reasoning against
 the Codex catalog because it uses the app-server, not the public Responses API.
-Claude's client-side effort selector has a smaller vocabulary: `ultra` displays
-as `max` and `minimal` as `low`, while the exact Codex route effort is preserved.
+Codex route effort is independent of Claude's native session effort. Selecting
+`ultra` for Codex does not select Claude's Ultracode mode.
 
 Sources: [Astra API reference](https://developers.openai.com/api/docs/models/gpt-6-astra)
 and [Codex bundled models](https://github.com/openai/codex/blob/rust-v0.153.4/codex-rs/models-manager/models.json).
 Run `codex debug models --bundled` to inspect your installed version.
+
+## Native effort and Ultracode
+
+For an Anthropic coordinator, use Claude's `/effort` command to choose the
+session effort. `/effort ultracode` selects native xhigh reasoning with dynamic
+workflow orchestration. It requires workflows to be enabled and the model and
+organization to allow xhigh. Workflow does not enable the mode automatically or
+override those requirements.
+
+The launcher clears `CLAUDE_CODE_EFFORT_LEVEL` from the child environment and
+shadows stale settings-file values with an empty value in its private settings.
+It does not change persistent Claude settings. A nonempty environment value
+takes precedence over the native effort selector; even `auto` is an override,
+not a way to release it. This fixes the v0.3.0 warning that `max` overrides
+Ultracode. Upgrade and start a new session to remove the old launch-time pin.
+
+`claude-workflow config --effort max` continues to configure Codex's upstream
+effort, including direct Codex main routes. It does not pin Claude's session.
+Native launch flags such as `claude-workflow -- --effort xhigh` are also accepted.
+The Kimi and Qwen presets retain their required client effort and reject
+conflicting native launch flags.
+
+Sources: [Claude effort precedence](https://code.claude.com/docs/en/model-config#adjust-effort-level)
+and the installed Claude Code 2.1.261/2.1.267 effort-command contracts. The
+account-free regression executes `/effort ultracode` and checks that it enables
+the mode without an override warning or an inference request.
 
 ## One owner for tools and conversation state
 

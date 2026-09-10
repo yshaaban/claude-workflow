@@ -165,6 +165,7 @@ function parseCliArgs(rawArgs) {
   let passthrough = false;
   let claudeOptionsEnded = false;
   let interactiveSession = false;
+  let claudeEffortRequested = false;
 
   for (let index = 0; index < rawArgs.length; index += 1) {
     const arg = rawArgs[index];
@@ -191,9 +192,7 @@ function parseCliArgs(rawArgs) {
         );
       }
       if (CLAUDE_EFFORT_FLAGS.has(flagName)) {
-        throw new Error(
-          `${flagName} is managed by claude-workflow so routed main-model effort stays consistent`
-        );
+        claudeEffortRequested = true;
       }
       if (CLAUDE_PERMISSION_MODE_FLAGS.has(flagName)) {
         skipPermissions = false;
@@ -247,6 +246,7 @@ function parseCliArgs(rawArgs) {
 
   return {
     claudeArgs,
+    claudeEffortRequested,
     interactiveSession,
     promptArgs,
     skipPermissions,
@@ -516,11 +516,18 @@ async function main() {
     rawArgs = rawArgs.slice(1);
   }
 
-  const { claudeArgs, interactiveSession, promptArgs, skipPermissions } = parseCliArgs(rawArgs);
+  const {
+    claudeArgs, claudeEffortRequested, interactiveSession, promptArgs, skipPermissions,
+  } = parseCliArgs(rawArgs);
 
   const { config, mainModelId, rawSubagentModelId, subagentModelId, subagentRoute } =
     buildWorkflowGatewayConfig();
   const resolvedMainRoute = resolveModelRoute(mainModelId, config);
+  if (claudeEffortRequested && resolvedMainRoute.claudeEffort) {
+    throw new Error(
+      '--effort is managed by claude-workflow for this provider preset so its required client effort stays consistent'
+    );
+  }
   // Fail fast on launcher-managed subagent routes before starting Claude.
   resolveModelRoute(rawSubagentModelId, config);
   if (subagentModelId !== rawSubagentModelId) {
