@@ -1,7 +1,7 @@
 {
   "name": "@onetool/claude-workflow",
-  "version": "0.3.1",
-  "description": "Claude Code launcher with Opus, Fable, Codex, Kimi, and Qwen main routes plus Codex-backed workflow agents.",
+  "version": "0.4.0",
+  "description": "Claude Code launcher with Fable, Opus, Codex, Kimi, Qwen, and DeepSeek main routes plus Codex-backed agents.",
   "type": "module",
   "bin": {
     "claude-workflow": "js/cli/claude-workflow.js",
@@ -16,12 +16,13 @@
     "daemon:log": "bash scripts/claude-workflow-daemon.sh log",
     "check": "node scripts/check-syntax.mjs",
     "test": "npm run -s check && npm run -s test:gateway && npm run -s test:onboarding",
-    "test:gateway": "node --test test/installed-cli-policy.test.js test/codex-session-recency.test.js test/codex-capabilities.test.js test/codex-tool-catalog.test.js test/codex-read-lifecycle.test.js test/codex-appserver-protocol-hardening.test.js test/codex-appserver-installed-contract.test.js test/claude-gateway-http-contract.test.js test/upstream-cli-install.test.js && node test/gateway.test.js && node test/codex-provider-hardening.test.js && node test/daemon-observability.test.js && node --test test/security-hardening.test.js test/managed-state-ownership.test.js test/shell-migration.test.js test/kimi-provider.test.js test/qwen-provider.test.js test/installed-claude-kimi.test.js test/installed-claude-qwen.test.js test/installed-claude-codex.test.js test/installed-claude-fable.test.js",
+    "test:gateway": "node --test test/installed-cli-policy.test.js test/codex-session-recency.test.js test/codex-capabilities.test.js test/codex-tool-catalog.test.js test/codex-read-lifecycle.test.js test/codex-appserver-protocol-hardening.test.js test/codex-appserver-installed-contract.test.js test/claude-gateway-http-contract.test.js test/upstream-cli-install.test.js && node test/gateway.test.js && node test/codex-provider-hardening.test.js && node test/daemon-observability.test.js && node --test test/security-hardening.test.js test/managed-state-ownership.test.js test/shell-migration.test.js test/kimi-provider.test.js test/qwen-provider.test.js test/installed-claude-kimi.test.js test/installed-claude-qwen.test.js test/installed-claude-codex.test.js test/installed-claude-fable.test.js && node --test test/deepseek-provider.test.js test/installed-claude-deepseek.test.js",
     "test:onboarding": "node --test test/onboarding.test.js test/local-install.test.js",
     "test:package": "node test/package-install-smoke.test.js && node test/github-install-smoke.test.js",
     "test:upstream-compatibility": "node test/upstream-compatibility.mjs",
     "prepublishOnly": "npm test && npm run test:package",
-    "test:live:glm": "node test/glm/live-glm-gateway.js"
+    "test:live:glm": "node test/glm/live-glm-gateway.js",
+    "test:live:deepseek:workflow": "CLAUDE_WORKFLOW_LIVE_DEEPSEEK=1 node --test test/installed-claude-deepseek.test.js"
   },
   "keywords": [
     "claude-code",

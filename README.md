@@ -3,7 +3,7 @@
 Claude Workflow runs Claude Code through a per-launch loopback gateway. Fable 5.1
 handles the main session by default. Delegated agents run on GPT-6 Astra with
 max reasoning and the Codex long-context profile. The main session can also run
-directly on Codex, Kimi K3, or Alibaba Qwen 3.8 Max.
+directly on Codex, Kimi K3, Alibaba Qwen 3.8 Max, or DeepSeek V4.1 Flash.
 
 Claude Code remains the client and executes project tools and sessions. Protocol
 conversion happens locally and does not call another model. Third-party and
@@ -31,7 +31,7 @@ represented safely across providers.
 The default Fable/Codex route requires both `claude auth login` and `codex login`,
 with access to Fable 5.1 and GPT-6 Astra on the respective accounts.
 A direct Codex main route does not require Anthropic authentication. Kimi and
-Qwen use their own provider keys, but delegated Codex agents still require a
+Qwen and DeepSeek use their own provider keys, but delegated Codex agents still require a
 Codex login.
 
 Native Windows is not supported. See [Linux and WSL](#linux-and-wsl) before
@@ -39,13 +39,13 @@ installing under WSL.
 
 ## Getting started
 
-Install release `v0.3.1` from the canonical GitHub repository. npm 12 blocks
+Install release `v0.4.0` from the canonical GitHub repository. npm 12 blocks
 Git dependencies by default, so the command grants access only to the package
 named on the command line:
 
 ```bash
 npm install --global --allow-git=root \
-  git+https://github.com/yshaaban/claude-workflow.git#v0.3.1
+  git+https://github.com/yshaaban/claude-workflow.git#v0.4.0
 ```
 
 Use a user-owned npm prefix, nvm, Volta, or another Node version manager if a
@@ -95,7 +95,7 @@ claude-workflow config --main codex --agents astra --effort max --context long
 claude-workflow setup
 ```
 
-Kimi and Qwen also skip Anthropic login. Configure the route and provider key
+Kimi, Qwen, and DeepSeek also skip Anthropic login. Configure the route and provider key
 first, then run setup. Delegated Codex agents still require `codex login`.
 
 ## Default routing
@@ -111,7 +111,7 @@ however: with default Astra agents, Fable 5.1 and Opus 5 compact at 784,800.
 Non-Anthropic IDs also share Claude's custom-model maximum. The launcher sets
 that maximum to the smallest truthful window across the custom main route, when
 present, and the delegated Codex route. With default agents, `codex-astra`,
-Kimi, and Qwen get an 828,400-token client maximum and compact at 784,800, even
+Kimi, Qwen, and DeepSeek get an 828,400-token client maximum and compact at 784,800, even
 when the main provider accepts more.
 
 The concise `codex-astra` ID is intentional. Claude Code receives its display
@@ -223,6 +223,7 @@ claude-workflow config --main codex  # direct Codex response
 claude-workflow config --main kimi   # Kimi K3, 1,048,576-token plan
 claude-workflow config --main k3     # Kimi K3, 262,144-token plan
 claude-workflow config --main qwen   # Qwen 3.8 Max, 1M context / 983,616 max input
+claude-workflow config --main deepseek # DeepSeek V4.1 Flash, max reasoning
 ```
 
 Start a new Claude Code session after changing routes. `claude-workflow config`
@@ -235,6 +236,24 @@ Claude Code current and start a new session when changing model families:
 Fable 5.1 binds thinking to the preceding conversation, and older models
 cannot reuse its thinking blocks. See Anthropic's
 [migration guide](https://platform.claude.com/docs/en/models/fable-5-1/migration-guide).
+
+### DeepSeek V4.1 Flash
+
+Add `DEEPSEEK_API_KEY=your_deepseek_api_key` to `~/.claude-workflow.env`, protect
+it with `chmod 600 ~/.claude-workflow.env`, then select the route:
+
+```bash
+codex login
+claude-workflow config --main deepseek
+claude-workflow setup
+claude-workflow
+```
+
+The model appears as `deepseek-flash`. Streaming, thinking-history replay,
+file tools, and images use the existing local protocol adapter. No extra model
+call rewrites the answer. The profile supports DeepSeek's documented 1M window;
+Claude's shared custom-model limit remains bounded by the selected Codex agents.
+See [DeepSeek setup, limits, and tests](docs/DEEPSEEK.md).
 
 ### Direct Codex
 
@@ -648,7 +667,7 @@ Reinstall this release, then run the setup checks and upgrade maintenance:
 
 ```bash
 npm install --global --allow-git=root \
-  git+https://github.com/yshaaban/claude-workflow.git#v0.3.1
+  git+https://github.com/yshaaban/claude-workflow.git#v0.4.0
 claude-workflow setup
 ```
 

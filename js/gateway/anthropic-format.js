@@ -39,7 +39,7 @@ function normalizedBlocks(content) {
   );
 }
 
-function renderToolResultContent(content) {
+function renderToolResultContent(content, options = {}) {
   if (typeof content === 'string') {
     return content;
   }
@@ -50,6 +50,17 @@ function renderToolResultContent(content) {
       'invalid_request_error',
       'tool_result content must be a string or an array of text blocks'
     );
+  }
+
+  if (options.supportsToolResultImages && content.some((block) => block?.type === 'image')) {
+    return content.map((block) => {
+      if (block?.type === 'text') return { type: 'text', text: block.text || '' };
+      if (block?.type === 'image') {
+        return { type: 'image_url', image_url: { url: translateImageSource(block.source) } };
+      }
+      throw new GatewayError(400, 'invalid_request_error',
+        `unsupported tool_result content block type: ${String(block?.type)}`);
+    });
   }
 
   const textParts = [];
@@ -102,7 +113,7 @@ function openAiUserContent(parts) {
   return parts;
 }
 
-function translateUserMessage(message) {
+function translateUserMessage(message, options = {}) {
   const blocks = normalizedBlocks(message.content);
   const contentParts = [];
   const toolResults = [];
@@ -130,7 +141,7 @@ function translateUserMessage(message) {
       toolResults.push({
         role: 'tool',
         tool_call_id: block.tool_use_id,
-        content: renderToolResultContent(block.content),
+        content: renderToolResultContent(block.content, options),
       });
       continue;
     }
@@ -238,7 +249,7 @@ function translateAssistantMessage(message, options = {}) {
         throw new GatewayError(
           400,
           'invalid_request_error',
-          'Qwen cannot replay redacted_thinking without changing the preserved reasoning; start a new turn or remove the incompatible history block'
+          `${options.providerLabel || 'Qwen'} cannot replay redacted_thinking without changing the preserved reasoning; start a new turn or remove the incompatible history block`
         );
       }
       continue;
@@ -255,7 +266,7 @@ function translateAssistantMessage(message, options = {}) {
     throw new GatewayError(
       400,
       'invalid_request_error',
-      'Qwen requires one unmodified thinking block per assistant message; multiple thinking blocks cannot be merged safely'
+      `${options.providerLabel || 'Qwen'} requires one unmodified thinking block per assistant message; multiple thinking blocks cannot be merged safely`
     );
   }
 
@@ -314,7 +325,7 @@ function translateMessages(messages, options = {}) {
       continue;
     }
     if (message?.role === 'user') {
-      translated.push(...translateUserMessage(message));
+      translated.push(...translateUserMessage(message, options));
       continue;
     }
     if (message?.role === 'assistant') {
@@ -431,12 +442,13 @@ function validateRouteToolChoice(route, toolChoice) {
   throw new GatewayError(
     400,
     'invalid_request_error',
-    'Qwen deep-thinking routes support only tool_choice auto or none; required and named tool choices cannot be preserved'
+    `${route.providerLabel || 'Qwen'} deep-thinking routes support only tool_choice auto or none; required and named tool choices cannot be preserved`
   );
 }
 
 function shouldTranslateToolChoice(route) {
-  return !(route.provider === 'deepseek' && route.thinking?.type === 'enabled');
+  return !(route.provider === 'deepseek' && route.thinking?.type === 'enabled' &&
+    !route.preserveAssistantThinking);
 }
 
 function supportsThinkingControls(route) {
@@ -500,6 +512,7 @@ export function translateAnthropicMessagesRequestWithOptions(requestBody, route,
   const systemRole = route.systemRole || 'developer';
   const translationOptions = {
     ...options,
+    supportsToolResultImages: route.supportsToolResultImages === true,
     systemRole,
   };
 

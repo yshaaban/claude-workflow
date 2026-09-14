@@ -1,3 +1,16 @@
+export const DEEPSEEK_FLASH_DEFAULTS = Object.freeze({
+  model: 'deepseek-flash',
+  baseUrl: 'https://api.deepseek.com',
+  reasoningEffort: 'max',
+  // Conservative decimal interpretation of DeepSeek's documented 1M window.
+  contextTokens: 1_000_000,
+  maxOutputTokens: 393_216,
+});
+
+export function isDeepSeekFlashModel(model) {
+  return ['deepseek-flash', 'deepseek-v4-flash', 'deepseek-v4-flash-vision-exp'].includes(model);
+}
+
 export const QWEN_TOKEN_PLAN_DEFAULTS = Object.freeze({
   baseUrl: 'https://token-plan.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1',
   model: 'qwen3.8-max',

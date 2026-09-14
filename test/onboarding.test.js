@@ -131,6 +131,27 @@ async function installFakeNativeTools(root) {
   return bin;
 }
 
+test('DeepSeek preset selects V4.1 Flash, keeps agent defaults, and needs no Claude login', async (t) => {
+  const root = await temporaryDirectory(t, 'workflow-deepseek-config-');
+  const home = path.join(root, 'home');
+  await fsp.mkdir(home);
+  const bin = await installFakeNativeTools(root);
+  const env = isolatedEnvironment(home, { PATH: `${bin}${path.delimiter}${process.env.PATH}`,
+    FAKE_CLAUDE_LOGGED_OUT: '1', DEEPSEEK_API_KEY: 'test-only-deepseek' });
+  for (const main of ['deepseek', 'deepseek-flash', 'deepseek-v4.1-flash']) {
+    const result = runCli(['config', '--main', main], { env });
+    assert.equal(result.status, 0, result.stderr);
+    const saved = await fsp.readFile(path.join(home, '.claude-workflow.env'), 'utf8');
+    assert.match(saved, /^ULTRATHINK_GATEWAY_MAIN_PROVIDER=deepseek$/mu);
+    assert.match(saved, /^ULTRATHINK_GATEWAY_MAIN_UPSTREAM_MODEL=deepseek-flash$/mu);
+    assert.match(saved, /^ULTRATHINK_GATEWAY_MAIN_REASONING_EFFORT=max$/mu);
+    assert.doesNotMatch(saved, /test-only-deepseek/u);
+  }
+  const doctor = runCli(['doctor', '--json'], { env });
+  assert.equal(doctor.status, 0, doctor.stderr || doctor.stdout);
+  assert.match(doctor.stdout, /deepseek-flash/u);
+});
+
 test('configuration rewriting preserves unmanaged content and line endings', function () {
   const original = [
     '# personal note',

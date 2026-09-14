@@ -22,6 +22,8 @@ described in [SECURITY.md](SECURITY.md), not in an issue.
   higher. Moderato can select the 256K profile with `config --main k3`.
 - For Qwen, an Alibaba Token Plan with access to `qwen3.8-max` and a matching
   `sk-sp-` key for the configured region and endpoint.
+- For DeepSeek V4.1 Flash, a DeepSeek API key with credit and access to
+  `deepseek-flash`. See [DeepSeek setup and limits](docs/DEEPSEEK.md).
 
 On WSL, install Node.js, Claude Code, Codex, and Claude Workflow in the same
 distribution. Their commands, user configuration, and gateway state must use
@@ -35,7 +37,7 @@ default `gpt-6-astra` route is absent, run
 your Codex workspace. The interactive Codex `/model` picker shows available
 choices.
 
-Direct Codex, Kimi, and Qwen use documented per-session custom-model settings;
+Direct Codex, Kimi, Qwen, and DeepSeek use documented per-session custom-model settings;
 Claude Workflow does not modify `.claude.json`, user settings, or project
 settings. Kimi uses its own provider route and does not need to appear in the
 Codex catalog or gateway discovery response; the launcher adds its exact ID to

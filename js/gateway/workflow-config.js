@@ -21,6 +21,7 @@ import {
 } from './model-routing.js';
 import { proxyExclusionEnvForHost } from './proxy.js';
 import {
+  DEEPSEEK_FLASH_DEFAULTS,
   QWEN_TOKEN_PLAN_DEFAULTS,
   providerRequiresGatewayAuth,
 } from './provider-profiles.js';
@@ -72,6 +73,7 @@ export const DEFAULT_MAIN_MODEL_ID = FABLE_MAIN_MODEL_ID;
 export const DEFAULT_SUBAGENT_REASONING_EFFORT = 'max';
 export const KIMI_MAIN_MODEL_ID = 'k3';
 export const QWEN_MAIN_MODEL_ID = QWEN_TOKEN_PLAN_DEFAULTS.model;
+export const DEEPSEEK_MAIN_MODEL_ID = DEEPSEEK_FLASH_DEFAULTS.model;
 
 export function envString(name, fallback = '') {
   const value = process.env[name];
@@ -403,7 +405,7 @@ export function buildWorkflowGatewayConfig({
   // that qualifier as exactly 1,000,000 tokens and ignores the truthful
   // custom-model window, so normalize those persisted IDs at the boundary.
   const normalizedMainModelId =
-    mainProvider === 'kimi' || mainProvider === 'qwen' || mainProvider === 'codex'
+    mainProvider === 'kimi' || mainProvider === 'qwen' || mainProvider === 'codex' || mainProvider === 'deepseek'
       ? modelIdWithoutBracketQualifiers(configuredMainModelId)
       : configuredMainModelId;
   const mainUpstreamModel = envString(
@@ -889,6 +891,9 @@ function modelPickerLabel(modelId, route) {
   if (provider === 'qwen') {
     return 'Qwen 3.8 Max';
   }
+  if (provider === 'deepseek' && route.preserveAssistantThinking) {
+    return 'DeepSeek V4.1 Flash';
+  }
   if (provider === 'anthropic') {
     const normalized = modelIdWithoutBracketQualifiers(modelId);
     for (const [pattern, label] of [
@@ -955,8 +960,10 @@ function routeContextContract(config, route) {
         ? { usableContextTokens: Math.trunc(tokens), autoCompactTokens: Math.trunc(tokens) }
         : null;
     }
+    case 'deepseek':
     case 'qwen': {
-      const tokens = Number(route.contextTokens || config.qwen?.contextTokens || 0);
+      const provider = routeProvider(route, '');
+      const tokens = Number(route.contextTokens || config[provider]?.contextTokens || 0);
       return tokens > 0
         ? { usableContextTokens: Math.trunc(tokens), autoCompactTokens: Math.trunc(tokens) }
         : null;

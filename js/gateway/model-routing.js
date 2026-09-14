@@ -1,7 +1,9 @@
 import {
+  DEEPSEEK_FLASH_DEFAULTS,
   GATEWAY_PROVIDER_IDS,
   QWEN_TOKEN_PLAN_DEFAULTS,
   gatewayProviderProfile,
+  isDeepSeekFlashModel,
   kimiProfileConfigurationIssue,
   qwenProfileConfigurationIssue,
   routeProviderMetadata,
@@ -317,15 +319,32 @@ function buildOpenAiRoute(modelId, config, entry = null) {
 }
 
 function buildDeepSeekRoute(modelId, config, entry = null) {
-  return buildOpenAiCompatibleRoute(modelId, config, entry, {
+  const route = buildOpenAiCompatibleRoute(modelId, config, entry, {
     provider: ROUTE_PROVIDERS.DEEPSEEK,
     configKey: 'deepseek',
     displayProvider: 'DeepSeek',
     maxTokensField: 'max_tokens',
     systemRole: 'system',
+    stripModelBracketQualifiers: true,
     missingKeyMessage:
       'DeepSeek routing is configured but ULTRATHINK_GATEWAY_DEEPSEEK_API_KEY or DEEPSEEK_API_KEY is missing',
   });
+  if (!isDeepSeekFlashModel(route.upstreamModel)) {
+    return route;
+  }
+  return {
+    ...route,
+    preserveAssistantThinking: true,
+    emitReasoningContent: true,
+    strictThinkingReplay: true,
+    // Live V4.1 rejects required/named tool choices while thinking is enabled.
+    // Preserve auto/none instead of silently discarding the caller's choice.
+    toolChoicePolicy: route.thinking?.type === 'enabled' ? 'auto-none' : '',
+    supportsParallelToolCalls: false,
+    supportsToolResultImages: true,
+    contextTokens: config.deepseek.contextTokens || DEEPSEEK_FLASH_DEFAULTS.contextTokens,
+    maxOutputTokens: config.deepseek.maxOutputTokens || DEEPSEEK_FLASH_DEFAULTS.maxOutputTokens,
+  };
 }
 
 function buildGlmRoute(modelId, config, entry = null) {

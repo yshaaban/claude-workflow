@@ -8,7 +8,7 @@ import {
   normalizeCodexContextProfile,
   resolveCodexCapabilities,
 } from './codex-capabilities.js';
-import { QWEN_TOKEN_PLAN_DEFAULTS } from './provider-profiles.js';
+import { DEEPSEEK_FLASH_DEFAULTS, QWEN_TOKEN_PLAN_DEFAULTS } from './provider-profiles.js';
 
 const DEFAULT_EXPOSED_MODELS = Object.freeze([
   'claude-fable-5-1',
@@ -424,10 +424,14 @@ export function loadGatewayConfig() {
       baseUrl: firstDefinedString(
         process.env.ULTRATHINK_GATEWAY_DEEPSEEK_BASE_URL,
         process.env.DEEPSEEK_BASE_URL,
-        'https://api.deepseek.com'
+        DEEPSEEK_FLASH_DEFAULTS.baseUrl
       ),
-      model: deepSeekProfileValue('model', 'deepseek-v4-pro'),
-      reasoningEffort: deepSeekProfileValue('reasoningEffort', 'max'),
+      model: deepSeekProfileValue('model', DEEPSEEK_FLASH_DEFAULTS.model),
+      reasoningEffort: deepSeekProfileValue('reasoningEffort', DEEPSEEK_FLASH_DEFAULTS.reasoningEffort),
+      contextTokens: clampNumber(process.env.ULTRATHINK_GATEWAY_DEEPSEEK_CONTEXT_TOKENS,
+        DEEPSEEK_FLASH_DEFAULTS.contextTokens, { min: 1, max: DEEPSEEK_FLASH_DEFAULTS.contextTokens }),
+      maxOutputTokens: clampNumber(process.env.ULTRATHINK_GATEWAY_DEEPSEEK_MAX_OUTPUT_TOKENS,
+        DEEPSEEK_FLASH_DEFAULTS.maxOutputTokens, { min: 1, max: DEEPSEEK_FLASH_DEFAULTS.maxOutputTokens }),
       thinking: thinkingForProvider('deepseek'),
     },
     glm: {

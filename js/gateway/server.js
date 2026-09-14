@@ -560,6 +560,7 @@ function openAiCompatibleTranslationOptions(req, route, toolReasoningCache) {
 
   return {
     preserveAssistantThinking: true,
+    providerLabel: route.providerLabel,
     emitReasoningContent: route.emitReasoningContent === true,
     strictThinkingReplay: route.strictThinkingReplay === true,
     reasoningContentForToolCall(toolCallId) {
@@ -1935,6 +1936,9 @@ export function createGatewayApp(config = loadGatewayConfig(), codexSessions = n
       deepseek_model: config.deepseek?.model || null,
       deepseek_reasoning_effort: config.deepseek?.reasoningEffort || null,
       deepseek_thinking: config.deepseek?.thinking?.type || null,
+      deepseek_context_tokens: config.deepseek?.contextTokens ?? null,
+      deepseek_max_output_tokens: config.deepseek?.maxOutputTokens ?? null,
+      deepseek_key_configured: Boolean(config.deepseek?.apiKey),
       glm_model: config.glm?.model || null,
       glm_reasoning_effort: config.glm?.reasoningEffort || null,
       glm_thinking: config.glm?.thinking?.type || null,

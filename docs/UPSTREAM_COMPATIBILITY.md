@@ -120,8 +120,16 @@ Run `npm run test:upstream-compatibility` with both supported CLIs installed.
 It fails if a required executable is missing. Tests inspect generated app-server
 schemas and actual tool advertisements, then run clean-home Claude sessions
 against controlled upstream responses. They cover native Fable tool replay,
-Codex identity and context, direct-response request counts, and the Kimi/Qwen
+Codex identity and context, direct-response request counts, and the Kimi/Qwen/DeepSeek
 routes. No paid model requests are required.
+
+DeepSeek V4.1 Flash also has an opt-in [live verification harness](DEEPSEEK.md#verification).
+On September 14, 2026, text/tool/resume checks passed with Claude Code 2.1.261
+and 2.1.270. The 2.1.270 run also verified image output from Claude's Read tool.
+Six provider requests covered the plain answer, resumed read/edit, and image
+read/recognition. This verifies those journeys, not full-context saturation or
+Codex delegation. The full installed-CLI compatibility suite passed with
+Claude Code 2.1.270 as well.
 
 The offline suite covers stream lifecycle, cancellation, overload, context
 recovery, large-file paging, private catalog cleanup, and routing configuration.

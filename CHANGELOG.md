@@ -1,5 +1,26 @@
 # Changelog
 
+## 0.4.0 - 2026-09-14
+
+### Added
+
+- DeepSeek V4.1 Flash main preset: `claude-workflow config --main deepseek`.
+  The canonical `deepseek-flash` route uses max reasoning, a conservative
+  1,000,000-token context ceiling, and a 393,216-token output ceiling. Claude's
+  custom-model context remains bounded by the selected Codex agents.
+- User images and image tool results on Flash routes, including Claude's Read
+  tool. Explicit V4 Pro routes remain unchanged.
+- Installed-Claude regression coverage and an opt-in live test for streaming,
+  tool execution, file edits, image recognition, and session resume.
+
+### Fixed
+
+- Flash thinking history survives completed no-tool turns and gateway restarts.
+- Flash preserves automatic/disabled tool selection and rejects required/named
+  choices unsupported by the live thinking API instead of discarding them.
+- DeepSeek setup uses its own key without requiring Anthropic authentication
+  and leaves Claude's session effort unpinned.
+
 ## 0.3.1 - 2026-09-10
 
 ### Fixed

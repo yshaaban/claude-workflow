@@ -39,6 +39,7 @@ import {
   FABLE_MAIN_MODEL_ID,
   OPUS_MAIN_MODEL_ID,
   KIMI_MAIN_MODEL_ID,
+  DEEPSEEK_MAIN_MODEL_ID,
   QWEN_MAIN_MODEL_ID,
   routeProvider,
   routeTargetSummary,
@@ -74,6 +75,9 @@ const MAIN_PRESETS = Object.freeze({
   opus: Object.freeze({ model: OPUS_MAIN_MODEL_ID, provider: 'anthropic' }),
   fable: Object.freeze({ model: FABLE_MAIN_MODEL_ID, provider: 'anthropic' }),
   codex: Object.freeze({ model: 'codex', provider: 'codex' }),
+  deepseek: Object.freeze({ model: DEEPSEEK_MAIN_MODEL_ID, provider: 'deepseek' }),
+  'deepseek-flash': Object.freeze({ model: DEEPSEEK_MAIN_MODEL_ID, provider: 'deepseek' }),
+  'deepseek-v4.1-flash': Object.freeze({ model: DEEPSEEK_MAIN_MODEL_ID, provider: 'deepseek' }),
   kimi: Object.freeze({ model: KIMI_MAIN_MODEL_ID, provider: 'kimi' }),
   'k3[1m]': Object.freeze({ model: KIMI_MAIN_MODEL_ID, provider: 'kimi' }),
   k3: Object.freeze({ model: 'k3', provider: 'kimi', kimiContextTokens: '262144' }),
@@ -937,10 +941,11 @@ function configUsage() {
     '  claude-workflow config --main codex',
     '  claude-workflow config --main kimi',
     '  claude-workflow config --main qwen',
+    '  claude-workflow config --main deepseek',
     '  claude-workflow config --reset',
     '',
     'Options:',
-    '  --main <opus|fable|codex|kimi|k3|qwen|anthropic-model-id>  Main route; kimi/qwen use coding-plan profiles',
+    '  --main <opus|fable|codex|kimi|k3|qwen|deepseek|anthropic-model-id>  Main route; deepseek selects V4.1 Flash',
     '  --agents <astra|sol|terra|luna|id>  Shared Codex model for agents and direct main',
     '  --effort <level>              Codex effort, validated against the selected model catalog',
     '  --context <standard|long>     Codex context profile; also sets the launch-wide shared compaction ceiling',
@@ -988,6 +993,7 @@ export function runConfigCommand(args, options = {}) {
   const selectedMainPreset = MAIN_PRESETS[String(parsed.main || '').trim().toLowerCase()] || null;
   const selectsKimiMain = selectedMainPreset?.provider === 'kimi';
   const selectsQwenMain = selectedMainPreset?.provider === 'qwen';
+  const selectsDeepSeekMain = selectedMainPreset?.provider === 'deepseek';
   const selectsCodexMain = selectedMainPreset?.provider === 'codex';
   if (parsed.reset && writeOptions.length > 0) {
     throw new Error('--reset cannot be combined with configuration values');
@@ -1121,7 +1127,7 @@ export function runConfigCommand(args, options = {}) {
       if (selectedMainProvider === 'qwen') {
         updates.ULTRATHINK_GATEWAY_MAIN_REASONING_EFFORT =
           QWEN_TOKEN_PLAN_DEFAULTS.reasoningEffort;
-      } else if (selectedMainProvider === 'kimi') {
+      } else if (selectedMainProvider === 'kimi' || selectedMainProvider === 'deepseek') {
         updates.ULTRATHINK_GATEWAY_MAIN_REASONING_EFFORT = 'max';
       } else if (selectedMainProvider === 'codex') {
         updates.ULTRATHINK_GATEWAY_MAIN_REASONING_EFFORT =
@@ -1244,7 +1250,10 @@ export function runConfigCommand(args, options = {}) {
         `Next: ${qwenConfigurationGuidance(qwenConfigurationIssue)}`
       );
     }
-    if (selectsKimiMain || selectsQwenMain || selectsCodexMain) {
+    if (selectsDeepSeekMain && !loadGatewayConfig().deepseek.apiKey) {
+      writeLine(stdout, 'Next: set DEEPSEEK_API_KEY in ~/.claude-workflow.env, then run claude-workflow setup.');
+    }
+    if (selectsKimiMain || selectsQwenMain || selectsCodexMain || selectsDeepSeekMain) {
       writeLine(
         stdout,
         'Next: start a new `claude-workflow` session. Custom models use documented per-session Claude Code settings.'
