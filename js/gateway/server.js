@@ -1271,6 +1271,28 @@ async function flushToolUses(res, state) {
   }
 }
 
+function assertOpenAiCompletion(route, finishReason) {
+  if (route.strictCompletion && !['stop', 'length', 'tool_calls'].includes(finishReason)) {
+    throw new GatewayError(502, 'api_error', `${openAiCompatibleProviderLabel(route)} returned an incomplete or unsuccessful completion (finish_reason: ${String(finishReason).slice(0, 80)})`);
+  }
+}
+
+function assertOpenAiToolCompletion(route, finishReason, tools) {
+  if (!route.strictCompletion) return;
+  assertOpenAiCompletion(route, finishReason);
+  if ((tools.length > 0) !== (finishReason === 'tool_calls')) {
+    throw new GatewayError(502, 'api_error', `${openAiCompatibleProviderLabel(route)} returned tool calls inconsistent with its finish reason`);
+  }
+  // Validate the entire batch before exposing any executable tool to Claude.
+  for (const tool of tools) {
+    let input;
+    try { input = JSON.parse(tool.arguments); } catch { /* Rejected below. */ }
+    if (!tool.id || !tool.name || !input || typeof input !== 'object' || Array.isArray(input)) {
+      throw new GatewayError(502, 'api_error', `${openAiCompatibleProviderLabel(route)} returned an incomplete tool call or invalid tool arguments`);
+    }
+  }
+}
+
 async function streamOpenAiAsAnthropic(req, res, config, route, signal, toolReasoningCache) {
   const translationOptions = openAiCompatibleTranslationOptions(req, route, toolReasoningCache);
   const requestBody = translateAnthropicMessagesRequestWithOptions(
@@ -1318,17 +1340,19 @@ async function streamOpenAiAsAnthropic(req, res, config, route, signal, toolReas
       buffer = events.pop() || '';
 
       for (const event of events) {
-        const dataLines = event
+        let dataLines = event
           .split('\n')
           .filter(function pickData(line) {
-            return line.startsWith('data: ');
+            return line.startsWith(route.strictCompletion ? 'data:' : 'data: ');
           })
           .map(function stripPrefix(line) {
-            return line.slice('data: '.length).replace(/\r$/u, '');
+            return line.slice('data:'.length).replace(/^ /u, '').replace(/\r$/u, '');
           });
+        if (route.strictCompletion && dataLines.length) dataLines = [dataLines.join('\n')];
 
         for (const dataLine of dataLines) {
           if (dataLine === '[DONE]') {
+            assertOpenAiToolCompletion(route, state.finishReason, Array.from(state.toolCalls.values()));
             await closeReasoningBlock(res, state);
             await closeTextBlock(res, state);
             await ensureTextBlockStartedNoText(res, state);
@@ -1351,7 +1375,13 @@ async function streamOpenAiAsAnthropic(req, res, config, route, signal, toolReas
           try {
             payload = JSON.parse(dataLine);
           } catch {
+            if (route.strictCompletion) {
+              throw new GatewayError(502, 'api_error', `${openAiCompatibleProviderLabel(route)} returned malformed stream JSON`);
+            }
             continue;
+          }
+          if (route.strictCompletion && (!payload || typeof payload !== 'object' || payload.error)) {
+            throw new GatewayError(502, 'api_error', `${openAiCompatibleProviderLabel(route)} returned an upstream stream error`);
           }
           if (!state.messageId && payload.id) {
             state.messageId = payload.id;
@@ -1365,6 +1395,7 @@ async function streamOpenAiAsAnthropic(req, res, config, route, signal, toolReas
             continue;
           }
           if (choice.finish_reason) {
+            assertOpenAiCompletion(route, choice.finish_reason);
             state.finishReason = choice.finish_reason;
           }
           if (choice.delta?.reasoning_content) {
@@ -1405,6 +1436,9 @@ async function streamOpenAiAsAnthropic(req, res, config, route, signal, toolReas
     throw normalizeAbortError(error, signal);
   }
 
+  if (route.strictCompletion) {
+    throw new GatewayError(502, 'api_error', `${openAiCompatibleProviderLabel(route)} stream ended before its [DONE] marker; the response is incomplete`);
+  }
   await closeReasoningBlock(res, state);
   await closeTextBlock(res, state);
   await ensureTextBlockStartedNoText(res, state);
@@ -1748,6 +1782,20 @@ async function handleOpenAiJson(req, res, config, route, signal, toolReasoningCa
     return;
   }
 
+  if (route.strictCompletion && (body?.error || !body?.choices?.[0]?.message)) {
+    throw new GatewayError(502, 'api_error', `${openAiCompatibleProviderLabel(route)} returned an invalid completion`);
+  }
+  assertOpenAiCompletion(route, body?.choices?.[0]?.finish_reason);
+  if (route.strictCompletion) {
+    const choice = body.choices[0];
+    const tools = choice.message.tool_calls;
+    if (tools !== undefined && tools !== null && !Array.isArray(tools)) {
+      throw new GatewayError(502, 'api_error', `${openAiCompatibleProviderLabel(route)} returned an invalid tool call list`);
+    }
+    assertOpenAiToolCompletion(route, choice.finish_reason, (tools || []).map((tool) => ({
+      id: tool?.id, name: tool?.function?.name, arguments: tool?.function?.arguments,
+    })));
+  }
   res.json(translateOpenAiResponseToAnthropic(
     body,
     responseModelForRoute(config, route),

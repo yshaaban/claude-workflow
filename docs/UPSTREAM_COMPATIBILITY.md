@@ -131,6 +131,14 @@ read/recognition. This verifies those journeys, not full-context saturation or
 Codex delegation. The full installed-CLI compatibility suite passed with
 Claude Code 2.1.270 as well.
 
+The DeepSeek HTTP contract tests inject clean EOF, missing completion markers,
+malformed JSON, provider error frames, resource interruptions, and invalid
+tool batches. Flash must report these as failures without releasing partial
+tools or issuing a gateway retry. Valid fragmented UTF-8, CRLF, multiline SSE,
+usage chunks, and output-limit stops are covered separately. Effort tests check
+the max default, aliases, explicit opt-outs, and independence from Claude's
+session effort.
+
 The offline suite covers stream lifecycle, cancellation, overload, context
 recovery, large-file paging, private catalog cleanup, and routing configuration.
 The WSL smoke job runs on Ubuntu 24.04 under WSL 2, including private catalog

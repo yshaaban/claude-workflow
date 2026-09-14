@@ -39,13 +39,13 @@ installing under WSL.
 
 ## Getting started
 
-Install release `v0.4.0` from the canonical GitHub repository. npm 12 blocks
+Install release `v0.4.1` from the canonical GitHub repository. npm 12 blocks
 Git dependencies by default, so the command grants access only to the package
 named on the command line:
 
 ```bash
 npm install --global --allow-git=root \
-  git+https://github.com/yshaaban/claude-workflow.git#v0.4.0
+  git+https://github.com/yshaaban/claude-workflow.git#v0.4.1
 ```
 
 Use a user-owned npm prefix, nvm, Volta, or another Node version manager if a
@@ -249,11 +249,16 @@ claude-workflow setup
 claude-workflow
 ```
 
-The model appears as `deepseek-flash`. Streaming, thinking-history replay,
+The model appears as `deepseek-flash` with max thinking by default. Remove any
+saved or exported `ULTRATHINK_THINKING_LEVEL=OFF` to enable thinking. Codex
+agent effort remains separate; no Claude session effort override is required.
+
+Streaming, thinking-history replay,
 file tools, and images use the existing local protocol adapter. No extra model
 call rewrites the answer. The profile supports DeepSeek's documented 1M window;
 Claude's shared custom-model limit remains bounded by the selected Codex agents.
-See [DeepSeek setup, limits, and tests](docs/DEEPSEEK.md).
+Incomplete streams and invalid tool calls fail explicitly. See
+[DeepSeek setup, limits, and tests](docs/DEEPSEEK.md).
 
 ### Direct Codex
 
@@ -667,7 +672,7 @@ Reinstall this release, then run the setup checks and upgrade maintenance:
 
 ```bash
 npm install --global --allow-git=root \
-  git+https://github.com/yshaaban/claude-workflow.git#v0.4.0
+  git+https://github.com/yshaaban/claude-workflow.git#v0.4.1
 claude-workflow setup
 ```
 

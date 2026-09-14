@@ -22,6 +22,10 @@ claude-workflow setup
 claude-workflow
 ```
 
+The preset saves `deepseek-flash` with max reasoning. If an older configuration
+sets `ULTRATHINK_THINKING_LEVEL=OFF`, remove that override to enable thinking.
+Shell exports take precedence over the saved file.
+
 Anthropic authentication is not required for this route. The DeepSeek account
 must have API credit and access to `deepseek-flash`. The same commands work on
 macOS, Linux, and WSL 2. Under WSL, use Linux-installed tools and a repository
@@ -67,11 +71,48 @@ and non-streaming responses retain thinking blocks. Resumed sessions replay
 thinking from the transcript, including completed turns without tool calls.
 This follows DeepSeek's [thinking-history contract](https://api-docs.deepseek.com/guides/thinking_mode/).
 
-Thinking defaults to `max`. Set `ULTRATHINK_GATEWAY_MAIN_REASONING_EFFORT` to
-`low`, `high`, or `max` to select another level. Set `ULTRATHINK_THINKING_LEVEL=OFF`
-to disable DeepSeek thinking. Workflow does not pin `CLAUDE_CODE_EFFORT_LEVEL`
-for DeepSeek. Claude's native mode and availability checks remain Claude-owned;
-enabling DeepSeek does not guarantee access to Fable's native Ultracode features.
+### Max thinking and overrides
+
+Workflow explicitly sends this configuration by default, even though
+DeepSeek's API defaults to `high`:
+
+```json
+{"thinking": {"type": "enabled"}, "reasoning_effort": "max"}
+```
+
+Use `low`, `high`, or `max` for effort. Compatibility aliases follow
+[DeepSeek's mapping](https://api-docs.deepseek.com/guides/thinking_mode/):
+`minimal` means `low`; `medium` and `xhigh` mean `high`; `ultra` means `max`.
+Unknown values fail locally. Missing or blank values fall back to the next
+configured value, then to `max`.
+
+Effort settings take precedence in this order:
+
+1. An explicit route-map entry's `reasoningEffort` or `reasoning_effort`.
+2. `ULTRATHINK_GATEWAY_MAIN_REASONING_EFFORT`, for the main route only.
+3. `ULTRATHINK_GATEWAY_DEEPSEEK_REASONING_EFFORT`.
+4. `ULTRATHINK_DEEPSEEK_REASONING_EFFORT`, the legacy provider setting.
+5. The `max` default.
+
+`claude-workflow config --main deepseek` saves the main-route effort as `max`.
+To lower it, edit `ULTRATHINK_GATEWAY_MAIN_REASONING_EFFORT` in
+`~/.claude-workflow.env`. `claude-workflow config --effort` configures Codex,
+not DeepSeek. The `Reasoning` line in `claude-workflow config` describes the
+agents, not the main model.
+
+`ULTRATHINK_THINKING_LEVEL=OFF` disables thinking for the provider profile;
+an explicit route-map `thinking` setting takes precedence over that profile.
+Disabled thinking or an effective effort of `none` omits `reasoning_effort`.
+Other global thinking levels do not lower DeepSeek's effort.
+Max effort does not force the maximum output size: Claude's requested output
+budget still applies, capped by the profile limit, and includes reasoning.
+
+Workflow clears inherited `CLAUDE_CODE_EFFORT_LEVEL` for DeepSeek so a stale
+Claude session setting cannot override the provider configuration. Claude's
+native mode and availability checks remain Claude-owned; DeepSeek does not
+grant access to Fable's native Ultracode features.
+
+### Tools and images
 
 In thinking mode, `tool_choice: auto` and `none` are preserved. Required and
 named choices fail locally because the live API rejects them. Older Pro routes
@@ -84,11 +125,29 @@ unsupported content blocks are rejected instead of silently discarded.
 DeepSeek's [vision limits](https://api-docs.deepseek.com/guides/vision/) and the
 gateway's request-body limit still apply.
 
+### Interrupted responses
+
+Flash responses must include a valid completion reason; streams must also
+reach the upstream `[DONE]` marker. Malformed JSON, provider error frames,
+aborted generation, and resource interruptions produce an error instead of
+a successful completion. See DeepSeek's
+[completion contract](https://api-docs.deepseek.com/api/create-chat-completion/).
+The gateway validates the entire tool-call batch
+before forwarding any tool call to Claude. Truncated tools are not executed.
+
+A normal text response that reaches its output limit is reported as
+`max_tokens`, not a complete answer. The gateway does not automatically retry
+these failures or spend tokens rewriting the response. Claude may apply its
+own retry policy; inspect the error before retrying manually.
+
 ## Verification
 
-The account-free suite uses an installed Claude Code binary, the actual Workflow
-launcher, and a controlled upstream. It checks one-request plain answers, tool
-execution, reasoning replay, and resume across a fresh gateway process:
+The account-free suite covers effort precedence and opt-outs, thinking replay,
+tool validation, interrupted streams, malformed frames, fragmented UTF-8,
+CRLF boundaries, multiline SSE data, usage, and output-limit handling. The
+installed-Claude test uses the actual Workflow launcher and a controlled
+upstream to check one-request plain answers, tool execution, and resume across
+a fresh gateway process:
 
 ```bash
 node --test test/deepseek-provider.test.js test/installed-claude-deepseek.test.js
@@ -106,24 +165,16 @@ The test stubs Codex's prerequisite check and makes no Codex inference request.
 It does not test delegation or full-window saturation. A live failure is a test
 failure, not a successful skip for missing credit or provider availability.
 
-## Integration design
+## Troubleshooting
 
-The change is limited to DeepSeek model selection and its protocol contract.
-Anthropic, Codex, Kimi, Qwen, permission behavior, credential isolation, and
-existing explicit Pro pins remain unchanged. Endpoint/authentication failures
-retain the gateway's existing handling; no new retry or inference layer is added.
+If the wrong model or effort is used, check shell exports, the main-route
+settings, and explicit route-map entries before changing the provider default.
+The workflow loads `~/.claude-workflow.env` before the legacy `~/.ultrathink.env`.
+Project `.env` files are ignored unless explicitly enabled. Restart the session
+after a configuration change; reconcile a shared daemon if one is in use.
 
-| Expected change | Policy owner | Verification |
-| --- | --- | --- |
-| Model ID or context/output limits | `provider-profiles.js` | Configuration and picker tests |
-| Thinking/tool/image compatibility | DeepSeek route flags and shared protocol adapter | Translation and installed-Claude tests |
-| Setup alias or defaults | Onboarding preset | Config/doctor tests with Claude logged out |
-
-The existing OpenAI transport already owns authentication, streaming, errors,
-and cancellation. Reusing it avoids a second transport policy solely for this
-release. The implementation adds no dependency, model-rewriting request, or
-mutable state owner. Before this change, DeepSeek depended on a tool-call cache
-and manual main-route configuration; Flash now uses persisted thinking blocks
-and a named preset. The migration order is profile/route, onboarding, contract
-tests, live tests, then synchronized release. Full-window behavior and Codex
-delegation are outside the DeepSeek live test's evidence.
+For authentication or quota failures, check the configured endpoint and the
+DeepSeek account's key, credit, and model access. Never include the key in a
+bug report. Include the Workflow and Claude Code versions, the selected model,
+whether the failure occurred during streaming or a tool call, and the error
+message with sensitive content removed.

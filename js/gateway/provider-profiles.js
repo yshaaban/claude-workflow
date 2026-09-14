@@ -11,6 +11,16 @@ export function isDeepSeekFlashModel(model) {
   return ['deepseek-flash', 'deepseek-v4-flash', 'deepseek-v4-flash-vision-exp'].includes(model);
 }
 
+export function normalizeDeepSeekReasoningEffort(value) {
+  const level = String(value ?? '').trim().toLowerCase() || DEEPSEEK_FLASH_DEFAULTS.reasoningEffort;
+  // DeepSeek's compatibility aliases differ from Codex: xhigh means high.
+  const levels = { none: 'none', minimal: 'low', low: 'low', medium: 'high', high: 'high', xhigh: 'high', max: 'max', ultra: 'max' };
+  if (!Object.hasOwn(levels, level)) {
+    throw new Error('DeepSeek reasoning effort must be low, high, max, none, or a documented alias (minimal, medium, xhigh, ultra)');
+  }
+  return levels[level];
+}
+
 export const QWEN_TOKEN_PLAN_DEFAULTS = Object.freeze({
   baseUrl: 'https://token-plan.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1',
   model: 'qwen3.8-max',

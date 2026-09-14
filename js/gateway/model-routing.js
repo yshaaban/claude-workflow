@@ -4,6 +4,7 @@ import {
   QWEN_TOKEN_PLAN_DEFAULTS,
   gatewayProviderProfile,
   isDeepSeekFlashModel,
+  normalizeDeepSeekReasoningEffort,
   kimiProfileConfigurationIssue,
   qwenProfileConfigurationIssue,
   routeProviderMetadata,
@@ -332,14 +333,28 @@ function buildDeepSeekRoute(modelId, config, entry = null) {
   if (!isDeepSeekFlashModel(route.upstreamModel)) {
     return route;
   }
+  let reasoningEffort;
+  try {
+    reasoningEffort = normalizeDeepSeekReasoningEffort(route.reasoningEffort);
+  } catch (error) {
+    throw new GatewayError(500, 'api_error', error.message);
+  }
+  let thinking = route.thinking ?? { type: 'enabled' };
+  if (!['enabled', 'disabled'].includes(thinking.type)) {
+    throw new GatewayError(500, 'api_error', 'DeepSeek thinking.type must be enabled or disabled');
+  }
+  if (reasoningEffort === 'none') thinking = { type: 'disabled' };
   return {
     ...route,
+    reasoningEffort,
+    thinking,
     preserveAssistantThinking: true,
     emitReasoningContent: true,
     strictThinkingReplay: true,
+    strictCompletion: true,
     // Live V4.1 rejects required/named tool choices while thinking is enabled.
     // Preserve auto/none instead of silently discarding the caller's choice.
-    toolChoicePolicy: route.thinking?.type === 'enabled' ? 'auto-none' : '',
+    toolChoicePolicy: thinking.type === 'enabled' ? 'auto-none' : '',
     supportsParallelToolCalls: false,
     supportsToolResultImages: true,
     contextTokens: config.deepseek.contextTokens || DEEPSEEK_FLASH_DEFAULTS.contextTokens,

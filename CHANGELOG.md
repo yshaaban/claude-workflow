@@ -1,5 +1,25 @@
 # Changelog
 
+## 0.4.1 - 2026-09-14
+
+### Fixed
+
+- DeepSeek Flash defaults missing thinking and effort settings to enabled/max,
+  validates effort names, and applies the provider's aliases consistently.
+  Explicit thinking opt-outs remain supported; `xhigh` maps to `high`, not max.
+- Interrupted Flash streams, malformed frames, and unsuccessful completion
+  reasons report errors instead of successful completions. Entire tool-call
+  batches are validated before any tool is forwarded, with no gateway retry.
+- Flash streaming accepts fragmented UTF-8, CRLF, and multiline SSE data while
+  preserving usage and output-limit stop reasons.
+
+### Documentation and tests
+
+- Setup and troubleshooting explain max thinking, override precedence, output
+  budgets, Claude session effort, and interrupted responses.
+- HTTP fault-injection tests cover incomplete streams and invalid tools;
+  installed-Claude tests include a stale session-effort override.
+
 ## 0.4.0 - 2026-09-14
 
 ### Added

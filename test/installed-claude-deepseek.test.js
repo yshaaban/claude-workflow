@@ -137,6 +137,8 @@ test('DeepSeek V4.1 through installed Claude Workflow: stream, tool execution, a
       CLAUDE_CONFIG_DIR: path.join(home, '.claude'),
       CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: '1',
       CLAUDE_CODE_MAX_OUTPUT_TOKENS: '8192',
+      // A stale Claude setting must not lower DeepSeek's provider-side default.
+      CLAUDE_CODE_EFFORT_LEVEL: 'low',
       ULTRATHINK_GATEWAY_MAIN_PROVIDER: 'deepseek',
       ULTRATHINK_GATEWAY_MAIN_MODEL_ID: 'deepseek-flash',
       ULTRATHINK_GATEWAY_MAIN_UPSTREAM_MODEL: 'deepseek-flash',
