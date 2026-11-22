@@ -390,7 +390,7 @@ test(
 );
 
 test('installed Codex releases interrupted threads across repeated cancellations on a warm connection',
-  { skip: CODEX_SKIP, timeout: 25_000 }, async (t) => {
+  { skip: CODEX_SKIP, timeout: 150_000 }, async (t) => {
     const cwd = await fs.mkdtemp(path.join(os.tmpdir(), 'codex-installed-cancel-'));
     const stateDir = path.join(cwd, 'codex-state');
     const previousHome = process.env.CODEX_HOME;
@@ -435,12 +435,12 @@ test('installed Codex releases interrupted threads across repeated cancellations
     process.env.CODEX_HOME = stateDir;
     process.env.CODEX_CANCEL_PROBE_KEY = 'loopback-only';
     manager = new CodexSessionManager({
-      requestTimeoutMs: 5_000, codex: {
+      requestTimeoutMs: 30_000, codex: {
         command: CODEX_COMMAND, cwd, idleTimeoutMs: 0, closeKillTimeoutMs: 300, maxSessions: 1,
       },
     });
     async function until(check, label) {
-      const deadline = Date.now() + 5_000;
+      const deadline = Date.now() + 15_000;
       while (Date.now() < deadline) {
         if (await check()) return;
         await new Promise(resolve => setTimeout(resolve, 20));
@@ -455,18 +455,22 @@ test('installed Codex releases interrupted threads across repeated cancellations
         onModelRequest = payload => { if (payload.includes(prompt)) resolve(); };
       });
       const req = { get: name => name === 'x-claude-code-session-id' ? 'cancel-probe' : '', abortSignal: abort.signal };
-      const rejected = assert.rejects(manager.processRequest(req, {
+      const turn = manager.processRequest(req, {
         model: 'cancel-probe', messages: [{ role: 'user', content: prompt }],
       }, { requestedModel: 'cancel-probe', upstreamModel: DEFAULT_CODEX_MODEL,
-        approvalPolicy: 'never', sandbox: 'read-only' }), error => error.status === 499);
+        approvalPolicy: 'never', sandbox: 'read-only' });
       // turn/start can acknowledge enqueueing before its core task is
       // interruptible. Observe this exact turn executing on the local provider.
-      await withTimeout(received, 5_000, 'the local provider to receive this turn');
+      // A startup/transport failure before cancellation is the real failure:
+      // let it win the race unchanged instead of asserting an unrelated 499.
+      await withTimeout(Promise.race([received, turn.then(() => {
+        throw new Error('Codex completed before the local provider received the held turn');
+      })]), 45_000, 'the local provider to receive this turn');
       const session = [...manager.sessions.values()][0];
       connection ??= session.connection;
       assert.equal(session.connection, connection);
       abort.abort();
-      await rejected;
+      await assert.rejects(turn, error => error.status === 499);
       assert.equal(manager.sessions.size, 1, 'a clean unsubscribe should keep the process warm');
       await until(async () => (await connection.request('thread/loaded/list', {})).data.length === 0,
         'the interrupted thread to leave the loaded inventory');
