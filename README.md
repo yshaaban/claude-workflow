@@ -30,18 +30,18 @@ represented safely across providers.
 
 The default Fable/Codex route requires both `claude auth login` and `codex login`,
 with access to Fable 5.2 and GPT-6.2 Astra on the respective accounts.
-A direct Codex main route does not require Anthropic authentication. Kimi and
-Qwen and DeepSeek use their own provider keys, but delegated Codex agents still require a
-Codex login.
+A direct Codex main route does not require Anthropic authentication. Kimi,
+Qwen, and DeepSeek use their own provider keys. Delegated Codex agents still
+require a Codex login.
 
 Native Windows is not supported. See [Linux and WSL](#linux-and-wsl) before
 installing under WSL.
 
 ## Getting started
 
-Install release `v0.5.1` from the canonical GitHub repository. npm 12 blocks
-Git dependencies by default, so the command grants access only to the package
-named on the command line:
+Install the [supported release](https://github.com/yshaaban/claude-workflow/releases/latest)
+from GitHub. With npm 12, `--allow-git=root` permits this Git package without
+allowing Git dependencies throughout the dependency tree:
 
 ```bash
 npm install --global --allow-git=root \
@@ -50,15 +50,6 @@ npm install --global --allow-git=root \
 
 Use a user-owned npm prefix, nvm, Volta, or another Node version manager if a
 global install would otherwise require `sudo`. Do not run this package as root.
-
-For development from source instead:
-
-```bash
-git clone https://github.com/yshaaban/claude-workflow.git
-cd claude-workflow
-npm install
-npm install --global --install-links .
-```
 
 Authenticate and verify the default route:
 
@@ -82,9 +73,8 @@ refreshes an owned running shared daemon after an upgrade; it never starts a
 stopped shared daemon unless you pass `--shared`. Run `claude-workflow doctor`
 later to repeat the read-only checks.
 
-To upgrade, run the same install command with the new release tag, then rerun
-`claude-workflow setup`. The package has no install-time lifecycle hooks, so npm
-does not mutate shell or daemon state from a temporary Git checkout.
+Already installed? See [Upgrade and uninstall](#upgrade-and-uninstall).
+For a source checkout, see [Development](#development).
 
 For a direct Codex main session, select the route before setup; Anthropic login
 is not required:
@@ -500,10 +490,6 @@ primitive for an explicit client that needs a stable gateway URL:
 ```bash
 claude-workflow setup --shared
 claude-workflow-gateway status
-claude-workflow-gateway reconcile
-claude-workflow-gateway log 100
-claude-workflow-gateway restart
-claude-workflow-gateway stop
 ```
 
 The daemon binds to `127.0.0.1:4318` by default. Its state, generated
@@ -521,23 +507,22 @@ changing a provider, credential, endpoint, model, or executable, run
 `claude-workflow-gateway reconcile` or rerun setup. Reconciliation replaces a
 stale running daemon but leaves a stopped daemon stopped.
 
-Plain `claude` sessions are never silently routed through the shared gateway.
-
-The explicit-client contract is the owner-only generated file at
-`${XDG_STATE_HOME:-$HOME/.cache}/claude-workflow/claude-workflow-gateway.env`.
-It exports the URL, local gateway credential, model IDs, and context settings.
-Apply it only inside the client process's subshell; do not print it, copy it, or
-source it from a persistent shell startup file:
+Plain `claude` sessions do not use the shared gateway automatically. To connect
+a client, load the daemon's owner-only environment file in a subshell. It
+contains the gateway URL, credential, model IDs, and context settings. Do not
+print it, copy it, or load it from a shell startup file.
 
 ```bash
 (
-  . "${XDG_STATE_HOME:-$HOME/.cache}/claude-workflow/claude-workflow-gateway.env"
-  exec claude
+  state_dir="${CLAUDE_WORKFLOW_GATEWAY_STATE_DIR:-${XDG_STATE_HOME:-$HOME/.cache}/claude-workflow}"
+  . "$state_dir/claude-workflow-gateway.env" && exec claude
 )
 ```
 
-Shared mode requires `bash` on `PATH`. The per-session launcher does not require
-Bash.
+If your daemon still uses the legacy `~/.cache/ultrathink` directory, use that
+path for `state_dir`. Check logs with `claude-workflow-gateway log 100`. Run
+`claude-workflow-gateway stop` when you want to shut it down. Shared mode
+requires Bash. The per-session launcher does not.
 
 ## Linux and WSL
 
@@ -633,11 +618,16 @@ issue.
 ## Development
 
 ```bash
-npm install
+git clone https://github.com/yshaaban/claude-workflow.git
+cd claude-workflow
+npm ci
 npm run check
 npm test
 npm run test:package
 ```
+
+To install your checkout as a standalone global command, run
+`npm install --global --install-links .` from that directory.
 
 The tests cover protocol lifecycle, context discovery, cancellation, overload,
 streaming, one-call passthrough, large tool results, provider contracts,
@@ -658,39 +648,28 @@ context, and tool-isolation contracts and their upstream sources.
 
 ## Upgrade and uninstall
 
-Reinstall this release, then run the setup checks and upgrade maintenance:
+Install the supported GitHub tag, verify the installed version, then run setup:
 
 ```bash
 npm install --global --allow-git=root \
   git+https://github.com/yshaaban/claude-workflow.git#v0.5.1
+claude-workflow --version
 claude-workflow setup
 ```
 
-Use another tag only to reproduce older behavior; the latest release is the
-supported version. npm registry publication is not required for GitHub
-installation.
-
-Upgrades preserve explicitly saved model IDs and shell overrides. To adopt the
-current defaults, update both CLIs and select the new profile:
+Upgrading the package preserves saved model IDs and shell overrides. To keep
+your existing routes, no configuration changes are needed. To switch to the
+current Fable coordinator and Astra agents, run:
 
 ```bash
-codex update
-claude update
 claude-workflow config --main fable --agents astra --effort max --context long
-claude-workflow setup
 claude-workflow doctor
 ```
 
-Use your package manager to update Codex if it does not support `codex update`.
-Start a new terminal and Claude Workflow session. Shared-mode users can run
-`claude-workflow-gateway reconcile` to replace a running stale gateway.
-
-Upgrading the launcher preserves explicit model pins. To reconfigure an
-older pair, pass its exact IDs, for example
-`claude-workflow config --main claude-opus-5 --agents gpt-5.6-terra --effort max --context long`.
-The `opus` and `terra` presets select their current versions. Custom route
-maps must keep the fallback targets named in any configuration error on
-Anthropic.
+If setup reports an unsupported CLI, update that CLI using its installation
+method and rerun setup. Start a new Claude Workflow session after changing
+models. Shared-mode users should also run `claude-workflow-gateway reconcile`
+to apply route changes to a running daemon.
 
 Remove Claude Workflow with:
 
