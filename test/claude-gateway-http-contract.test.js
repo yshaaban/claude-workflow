@@ -4,6 +4,7 @@ import { once } from 'node:events';
 import test from 'node:test';
 
 import { loadGatewayConfig } from '../js/gateway/config.js';
+import { translateAnthropicMessagesRequest } from '../js/gateway/anthropic-format.js';
 import { createGatewayServer } from '../js/gateway/server.js';
 
 const REQUEST_BODY_LIMIT_BYTES = 32 * 1024 * 1024;
@@ -11,6 +12,50 @@ const GATEWAY_SECRET = 'gateway-test-secret';
 const UPSTREAM_SECRET = 'upstream-test-secret';
 const TEST_MODEL = 'claude-contract-test';
 const FABLE_MODEL = 'claude-fable-5-1';
+
+test('Codex count_tokens estimates inline images as visual inputs, not base64 text', async (t) => {
+  const gateway = await startGateway('http://127.0.0.1:1/', {
+    anthropicPassthroughModels: [],
+    codex: { enabled: true, model: 'gpt-6.2-sol' },
+    routeMap: { [TEST_MODEL]: { provider: 'codex', model: 'gpt-6.2-sol' } },
+  });
+  t.after(() => gateway.runtime.close());
+  const count = async (size) => {
+    const image = { type: 'image', source: { type: 'base64', media_type: 'image/png', data: 'a'.repeat(size) } };
+    const response = await rawPost(`${gateway.url}/v1/messages/count_tokens`, gatewayHeaders(), JSON.stringify({
+      model: TEST_MODEL, messages: [{ role: 'user', content: [image, {
+        type: 'tool_result', tool_use_id: 'call-1', content: [image],
+      }] }],
+    }));
+    assert.equal(response.status, 200);
+    return JSON.parse(response.body).input_tokens;
+  };
+  const small = await count(16);
+  assert.ok(small >= 2 * 1844 && small < 4000);
+  assert.equal(await count(1024 * 1024), small);
+});
+
+test('GPT-6.2 Chat routes omit sampling parameters and require Responses for tools', () => {
+  const text = { messages: [{ role: 'user', content: 'test' }], max_tokens: 128, temperature: 1, top_p: 0.5 };
+  for (const upstreamModel of ['gpt-6.2-sol', 'gpt-6.2-astra', 'gpt-6.2-sol-2026-11-01']) {
+    const route = { upstreamModel, provider: 'openai', reasoningEffort: 'max' };
+    const translated = translateAnthropicMessagesRequest({ ...text, tool_choice: { type: 'none' } }, route);
+    assert.equal(translated.model, upstreamModel);
+    assert.equal(translated.reasoning_effort, 'max');
+    assert.equal(translated.max_completion_tokens, 128);
+    for (const field of ['temperature', 'top_p', 'tool_choice']) assert.ok(!(field in translated));
+    for (const input of [
+      { tools: [{ name: 'Read', input_schema: { type: 'object' } }] },
+      { tool_choice: { type: 'tool', name: 'Read' } },
+      { messages: [{ role: 'user', content: [{ type: 'tool_result', tool_use_id: 't', content: 'ok' }] }] },
+      { messages: [{ role: 'assistant', content: [{ type: 'tool_use', id: 't', name: 'Read', input: {} }] }] },
+    ]) assert.throws(() => translateAnthropicMessagesRequest({ ...text, ...input }, route), /require Responses/u);
+    for (const reasoningEffort of ['none', 'minimal', 'ultra']) {
+      assert.throws(() => translateAnthropicMessagesRequest(text, { ...route, reasoningEffort }), /effort must be/u);
+    }
+  }
+  assert.equal(translateAnthropicMessagesRequest(text, { provider: 'openai', upstreamModel: 'other' }).temperature, 1);
+});
 
 function listen(server) {
   return new Promise((resolve, reject) => {

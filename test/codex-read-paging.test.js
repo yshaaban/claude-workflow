@@ -94,6 +94,24 @@ function pageMetadata(text) {
   return JSON.parse(text.slice(start + marker.length).split('\n')[0]);
 }
 
+test('Read image output is never parsed as numbered source or truncated mid-image', () => {
+  const text = [
+    { type: 'text', text: 'before' },
+    { type: 'image', source: { type: 'base64', media_type: 'image/png', data: 'YQ==' } },
+    { type: 'text', text: 'after' },
+  ];
+  const result = prepare({ text, maxBytes: 1024 });
+  assert.deepEqual(result.limitedToolResult.contentItems, [
+    { type: 'inputText', text: 'before' },
+    { type: 'inputImage', imageUrl: 'data:image/png;base64,YQ==' },
+    { type: 'inputText', text: 'after' },
+  ]);
+  const denied = prepare({ text, maxBytes: 10 }).limitedToolResult;
+  assert.equal(denied.isError, true);
+  assert.ok(denied.bytes <= 10);
+  assert.equal(denied.contentItems, undefined);
+});
+
 test('no PARTIAL banner never proves whole-file completeness', () => {
   const result = prepare({
     text: '1\tWarning: source text mentions a file offset\n2\tstill ordinary source',

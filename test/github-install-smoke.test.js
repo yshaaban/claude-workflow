@@ -250,12 +250,12 @@ try {
 
   await fs.writeFile(
     path.join(fakeBin, 'claude'),
-    '#!/usr/bin/env bash\nif [ "$1" = "--version" ]; then echo "2.1.261 (Claude Code)"; elif [ "$1" = "auth" ] && [ "$2" = "status" ] && [ "$3" = "--json" ]; then echo \'{"loggedIn":true}\'; else exit 2; fi\n',
+    '#!/usr/bin/env bash\nif [ "$1" = "--version" ]; then echo "2.1.330 (Claude Code)"; elif [ "$1" = "auth" ] && [ "$2" = "status" ] && [ "$3" = "--json" ]; then echo \'{"loggedIn":true}\'; else exit 2; fi\n',
     { mode: 0o755 }
   );
   await fs.writeFile(
     path.join(fakeBin, 'codex'),
-    '#!/usr/bin/env bash\nif [ "$1" = "--version" ]; then echo "codex-cli 0.153.4"; elif [ "$1" = "login" ] && [ "$2" = "status" ]; then echo "Logged in using ChatGPT"; else exit 2; fi\n',
+    '#!/usr/bin/env bash\nif [ "$1" = "--version" ]; then echo "codex-cli 0.171.0"; elif [ "$1" = "login" ] && [ "$2" = "status" ]; then echo "Logged in using ChatGPT"; else exit 2; fi\n',
     { mode: 0o755 }
   );
 

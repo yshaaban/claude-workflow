@@ -1,146 +1,114 @@
 # Upstream compatibility
 
-Claude Workflow uses Claude Code as the client and tool executor. Codex supplies
-reasoning through `codex app-server`; the gateway translates protocol events
-locally. It does not call a model to rewrite another model's response.
+Claude Code owns the session, permissions, and tool execution. Codex supplies
+GPT inference through its app-server. The gateway translates messages and
+tool events locally. It never sends a model response to another model to
+convert it into a tool call. A coordinator can still take a new turn after an
+agent returns. That turn is Claude deciding what to do next.
 
 ## Supported baseline
 
-The required baseline is Claude Code 2.1.261 and Codex CLI 0.153.4. Newer
-versions run through the same installed-client contracts in the upstream
-canary. A passing canary is evidence about that version, not a guarantee about
-future releases or live account entitlement.
+Use Claude Code 2.1.325 or newer and Codex CLI 0.171.0 or newer. Required CI
+tests Claude Code 2.1.325 and 2.1.330 with Codex 0.171.0. A daily canary runs the same contracts
+against the latest releases. Neither test grants access to a model.
 
-The default coordinator is `claude-fable-5-1`. Default agents use `gpt-6-astra`
-with max reasoning, exposed to Claude as `codex-astra`. Existing explicit model
-pins are not migrated automatically. The configuration aliases `sol`, `terra`,
-and `luna` select their released GPT-5.6 models, not a guessed GPT-6 family.
+| Setting | Current selection |
+| --- | --- |
+| Main coordinator | Anthropic `claude-fable-5-2` |
+| `--agents astra` (default) | `gpt-6.2-astra`, exposed as `codex-astra` |
+| `--agents sol` | `gpt-6.2-sol`, exposed as `codex-sol` |
+| `--agents terra` | `gpt-6.1-terra` |
+| `--agents luna` | `gpt-6-luna` |
 
-Sources: [Codex 0.153.4](https://github.com/openai/codex/releases/tag/rust-v0.153.4),
-[Claude Code changelog](https://github.com/anthropics/claude-code/blob/main/CHANGELOG.md),
-and [Claude model configuration](https://code.claude.com/docs/en/model-config).
+Full model IDs are exact pins. To move an existing installation to the new
+default, run `claude-workflow config --main fable --agents astra --effort max --context long`,
+then `claude-workflow setup` and start a new session.
 
 ## Context belongs to the selected runtime
 
-The GPT-6 Astra API advertises a 1,050,000-token context. Codex 0.153.4's bundled
-Astra catalog instead specifies 272,000 standard / 872,000 maximum raw tokens
-and a 95% usable window. Claude Workflow follows the installed Codex metadata,
-so the default long profile exposes 828,400 usable tokens and compacts at
-784,800. Explicit window overrides are clamped to that model's advertised
-maximum. A marketing label or `[1m]` suffix cannot enlarge it.
+Claude Workflow reads context and supported effort from the installed Codex
+catalog. It requests the raw context on thread creation and exposes the usable
+window to Claude. Codex 0.171.0 reports these values:
 
-Codex's catalog also advertises `ultra` reasoning for Astra; its API model
-reference lists levels only through `max`. Workflow validates reasoning against
-the Codex catalog because it uses the app-server, not the public Responses API.
-Codex route effort is independent of Claude's native session effort. Selecting
-`ultra` for Codex does not select Claude's Ultracode mode.
+| Model and profile | Raw context | Usable | Proactive compaction |
+| --- | ---: | ---: | ---: |
+| GPT-6.2 Astra, standard | 272,000 | 258,400 | 244,800 |
+| GPT-6.2 Sol, standard | 500,000 | 475,000 | 450,000 |
+| Either model, long (default) | 872,000 | 828,400 | 784,800 |
 
-Sources: [Astra API reference](https://developers.openai.com/api/docs/models/gpt-6-astra)
-and [Codex bundled models](https://github.com/openai/codex/blob/rust-v0.153.4/codex-rs/models-manager/models.json).
-Run `codex debug models --bundled` to inspect your installed version.
+A raw override is clamped to the selected model's maximum. A `[1m]` suffix
+does not change that limit. An individual tool result has a separate size
+limit. For a large review, use [bounded reads and diff hunks](LARGE_FILES_AND_DIFFS.md).
+
+The [OpenAI API model](https://developers.openai.com/api/docs/models/gpt-6.2-astra)
+has a different context ceiling. Use the [Codex catalog for your installed release](https://github.com/openai/codex/blob/rust-v0.171.0/codex-rs/models-manager/models.json)
+or run `codex debug models --bundled` for app-server values. The catalog also
+governs whether a Codex route accepts `ultra`. Direct OpenAI Chat Completions
+supports text requests through `max`. For GPT-6.2 tool calls, select the
+`codex` provider, which uses Responses. See the [GPT-6.2 migration guide](https://developers.openai.com/api/docs/guides/latest-model#migration-quickstart).
 
 ## Native effort and Ultracode
 
-For an Anthropic coordinator, use Claude's `/effort` command to choose the
-session effort. `/effort ultracode` selects native xhigh reasoning with dynamic
-workflow orchestration. It requires workflows to be enabled and the model and
-organization to allow xhigh. Workflow does not enable the mode automatically or
-override those requirements.
+Use `/effort` inside Claude Code to set the Anthropic coordinator's reasoning
+level. On Claude Code 2.1.330, `/effort ultracode` toggles dynamic workflows
+independently of that level. The selected model, account, and organization
+determine availability. Workflow does not enable Ultracode automatically.
 
-The launcher clears `CLAUDE_CODE_EFFORT_LEVEL` from the child environment and
-shadows stale settings-file values with an empty value in its private settings.
-It does not change persistent Claude settings. A nonempty environment value
-takes precedence over the native effort selector; even `auto` is an override,
-not a way to release it. This fixes the v0.3.0 warning that `max` overrides
-Ultracode. Upgrade and start a new session to remove the old launch-time pin.
+The launcher clears a stale `CLAUDE_CODE_EFFORT_LEVEL` for native Anthropic
+sessions without editing persistent Claude settings. The workflow config
+option `--effort` controls Codex. Kimi and Qwen retain their provider-specific
+effort requirements. See [Claude model configuration](https://code.claude.com/docs/en/model-config).
 
-`claude-workflow config --effort max` continues to configure Codex's upstream
-effort, including direct Codex main routes. It does not pin Claude's session.
-Native launch flags such as `claude-workflow -- --effort xhigh` are also accepted.
-The Kimi and Qwen presets retain their required client effort and reject
-conflicting native launch flags.
+## Tools and native Anthropic requests
 
-Sources: [Claude effort precedence](https://code.claude.com/docs/en/model-config#adjust-effort-level)
-and the installed Claude Code 2.1.261/2.1.267 effort-command contracts. The
-account-free regression executes `/effort ultracode` and checks that it enables
-the mode without an override warning or an inference request.
+Claude advertises the tools available to the current session. The gateway
+passes their schemas to Codex and maps each selected name and its arguments
+back to Claude. Claude runs the tool under the session's permission mode.
+The result goes back to the pending call on the same Codex turn. Claude-owned
+MCP servers work through the same path. The gateway does not grant tools that
+Claude has excluded.
 
-## One owner for tools and conversation state
+Inline images stay typed image inputs, including images returned by Read.
+Codex does not accept a whole PDF as a dynamic tool result. Request a bounded
+page range so Read can return page images. The gateway does not fetch URLs or
+claim to have read an attachment that Codex cannot receive.
 
-Feature switches alone do not isolate Astra. Codex can advertise native async
-questions and clock tools from `experimental_supported_tools` even when their
-older feature switches are disabled. Native async questions acknowledge their
-own call and continue running; they are not pending Claude tool calls with a
-matching result channel. Forwarding their text alone would not preserve that
-interaction.
+Codex 0.171 accepts dynamic tool definitions only at thread creation. On a
+Codex-enabled launch, Workflow asks Claude to connect its MCP servers and send
+their schemas up front. This uses more context when many servers are enabled,
+but tools remain callable throughout the turn. Disable unneeded servers in
+Claude. Native-only launches keep Claude's discovery settings. For an
+independent client, set `ENABLE_TOOL_SEARCH=false` before starting Claude.
+Codex chooses whether to call a tool. A named choice restricts the tool set,
+but app-server has no equivalent of Anthropic's forced invocation.
 
-For isolated workflow sessions, the gateway supplies Codex's supported startup
-`model_catalog_json` override. The owner-only temporary snapshot clears the
-experimental native-tool list and preserves all other model fields. The gateway
-creates one private snapshot per app-server connection and removes it when that
-connection closes. The source catalog is cached
-by executable, Codex home, and working directory; restart the gateway after an
-upstream update or catalog change. Missing catalog data and storage that does
-not enforce private permissions fail explicitly.
+Each isolated app-server uses a temporary, owner-only model catalog. It sets
+direct tool mode, clears experimental native tools, and disables the native
+patch handler. Claude remains the only tool executor in both per-session and
+shared mode. Restart a shared gateway after changing the upstream installation.
 
-The gateway also disables `features.context_management`. That experimental
-mode can otherwise re-enable native token-budget tools despite a disabled
-`features.token_budget`. Claude's supplied tools remain responsible for user
-questions and project operations. Codex's `functions.exec` and `functions.wait`
-control wrappers remain present; they are not native repository tools.
-
-Sources: [Codex tool construction](https://github.com/openai/codex/blob/rust-v0.153.4/codex-rs/core/src/tools/spec_plan.rs)
-and [experimental context setup](https://github.com/openai/codex/blob/rust-v0.153.4/codex-rs/core/src/session/token_budget.rs).
-
-## Native Fable request handling
-
-Fable 5.1 uses adaptive thinking and rejects forced `tool_choice: any` or a
-named tool, including on token-count requests. The gateway preserves those
-errors instead of converting the request to a different tool-selection policy.
-It also forwards thinking signatures, system and tool prefixes, per-turn
-fields, progress events, refusals, and upstream response headers.
-
-Fable 5.1 thinking is bound to its preceding conversation. Do not edit the
-prefix or move those thinking blocks to an older model. Start a new session
-when changing model families; Claude Code owns its native migration behavior.
-
-Fable's documented category-based fallback targets stay on Anthropic: Opus 5
-for biology and Opus 4.8 for cybersecurity. The Opus alias remains native where
-Claude needs it to arm fallback. Ordinary agents use the documented
-`CLAUDE_CODE_SUBAGENT_MODEL_FORCE` setting to select Codex; native forks and
-skill subagents explicitly inheriting main are exceptions. Explicit routing
-that conflicts with a native fallback fails configuration rather than silently
-changing the fallback provider.
-
-Source: [Fable 5.1 migration guide](https://platform.claude.com/docs/en/models/fable-5-1/migration-guide).
+Native Anthropic routes forward thinking, signatures, tool choices, refusals,
+and errors. Claude decides whether to continue, use an available native
+fallback, or show a refusal. The gateway does not retry or classify it. Start
+a new session when changing model families. Ordinary delegated agents use the
+configured Codex model. Native forks and skill agents that explicitly inherit
+the main model follow Claude's own rules.
 
 ## Verification
 
-Run `npm run test:upstream-compatibility` with both supported CLIs installed.
-It fails if a required executable is missing. Tests inspect generated app-server
-schemas and actual tool advertisements, then run clean-home Claude sessions
-against controlled upstream responses. They cover native Fable tool replay,
-Codex identity and context, direct-response request counts, and the Kimi/Qwen/DeepSeek
-routes. No paid model requests are required.
+Run `npm run test:upstream-compatibility` with both CLIs installed. It fails
+if either executable is missing. It checks actual tool advertisements on the
+model request, exercises Claude's coordinator and effort behavior, and runs a
+complete Claude–Codex loop for both Astra and Sol. Each loop reads and edits a
+marker near the end of a 12,000-line file, calls an MCP server, and checks the
+result and number of upstream requests. A coordinated case also starts the
+agent from Fable and checks that Fable receives its result in exactly one
+resume request.
 
-DeepSeek V4.1 Flash also has an opt-in [live verification harness](DEEPSEEK.md#verification).
-On September 14, 2026, text/tool/resume checks passed with Claude Code 2.1.261
-and 2.1.270. The 2.1.270 run also verified image output from Claude's Read tool.
-Six provider requests covered the plain answer, resumed read/edit, and image
-read/recognition. This verifies those journeys, not full-context saturation or
-Codex delegation. The full installed-CLI compatibility suite passed with
-Claude Code 2.1.270 as well.
-
-The DeepSeek HTTP contract tests inject clean EOF, missing completion markers,
-malformed JSON, provider error frames, resource interruptions, and invalid
-tool batches. Flash must report these as failures without releasing partial
-tools or issuing a gateway retry. Valid fragmented UTF-8, CRLF, multiline SSE,
-usage chunks, and output-limit stops are covered separately. Effort tests check
-the max default, aliases, explicit opt-outs, and independence from Claude's
-session effort.
-
-The offline suite covers stream lifecycle, cancellation, overload, context
-recovery, large-file paging, private catalog cleanup, and routing configuration.
-The WSL smoke job runs on Ubuntu 24.04 under WSL 2, including private catalog
-storage checks. Live provider availability, quota, model quality, and account
-access are separate from these protocol contracts.
+These tests use real CLIs and controlled provider responses. They test protocol
+compatibility without sending project files or using provider credits. They do
+not benchmark model quality or prove that an account is entitled to a model.
+The [DeepSeek live verification harness](DEEPSEEK.md#verification) is optional.
+To check actual account access for both GPT-6.2 models, run
+`node scripts/verify-hosted-codex.mjs --run`. It uses your Codex account and
+verifies that each model can retrieve a random value using Claude's Read tool.

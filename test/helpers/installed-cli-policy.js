@@ -1,4 +1,5 @@
 import { spawnSync } from 'node:child_process';
+import { MINIMUM_CLAUDE_VERSION, MINIMUM_CODEX_VERSION, versionAtLeast } from '../../js/utils/cli-versions.js';
 
 const REQUIRED_ENV_NAME = 'CLAUDE_WORKFLOW_REQUIRE_INSTALLED_CLIS';
 const TRUE_VALUES = new Set(['1', 'true', 'yes', 'on']);
@@ -22,6 +23,7 @@ export function installedCliPolicy({
   displayName,
   args = ['--version'],
   env = process.env,
+  minimumVersion,
   timeout = 5_000,
 }) {
   if (!command || !displayName) {
@@ -34,10 +36,14 @@ export function installedCliPolicy({
     timeout,
     windowsHide: true,
   });
-  const available = !result.error && result.status === 0;
   const version = String(result.stdout || result.stderr || '').trim();
   const required = isRequired(env);
-  const reason = available ? false : unavailableReason(displayName, command, result);
+  const reason = result.error || result.status !== 0
+    ? unavailableReason(displayName, command, result)
+    : minimumVersion && !versionAtLeast(version, minimumVersion)
+      ? `${displayName} contract tests require ${minimumVersion.join('.')} or newer; found ${version || 'an unknown version'}`
+      : false;
+  const available = !reason;
 
   if (required && !available) {
     throw new Error(
@@ -50,6 +56,18 @@ export function installedCliPolicy({
     required,
     skip: reason,
     version,
+  });
+}
+
+export function installedClaudePolicy(options) {
+  return installedCliPolicy({
+    command: 'claude', displayName: 'Claude Code', ...options, minimumVersion: MINIMUM_CLAUDE_VERSION,
+  });
+}
+
+export function installedCodexPolicy(options) {
+  return installedCliPolicy({
+    command: 'codex', displayName: 'Codex CLI', ...options, minimumVersion: MINIMUM_CODEX_VERSION,
   });
 }
 

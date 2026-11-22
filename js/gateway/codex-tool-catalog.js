@@ -40,18 +40,15 @@ export async function createCodexToolCatalog({ command, cwd, model, env = proces
     );
   }
 
-  // Model-selected experimental tools bypass ordinary feature switches. Clear
-  // the extension list, including future additions, so Claude owns questions
-  // and tool execution. Preserve every other model field and instruction.
-  const isolatedModels = models.map((entry) => {
-    if (!Array.isArray(entry?.experimental_supported_tools)) {
-      return entry;
-    }
-    return {
-      ...entry,
-      experimental_supported_tools: [],
-    };
-  });
+  // These fields register native handlers independently of feature flags.
+  // CodeModeOnly itself adds MCP resource tools even without MCP servers.
+  // Expose Claude's dynamic tools directly and retain other model metadata.
+  const isolatedModels = models.map((entry) => ({
+    ...entry,
+    experimental_supported_tools: [],
+    apply_patch_tool_type: null,
+    tool_mode: 'direct',
+  }));
   const directory = await fs.mkdtemp(path.join(temporaryRoot, 'claude-workflow-codex-catalog-'));
   let disposal = null;
   const dispose = () => {

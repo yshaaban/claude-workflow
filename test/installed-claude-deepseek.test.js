@@ -9,11 +9,11 @@ import { fileURLToPath } from 'node:url';
 import test from 'node:test';
 
 import { loadGatewayConfig } from '../js/gateway/config.js';
-import { installedCliPolicy } from './helpers/installed-cli-policy.js';
+import { installedClaudePolicy } from './helpers/installed-cli-policy.js';
 
 const CLI = fileURLToPath(new URL('../js/cli/claude-workflow.js', import.meta.url));
 const LIVE = process.env.CLAUDE_WORKFLOW_LIVE_DEEPSEEK === '1';
-const CLAUDE = installedCliPolicy({ command: 'claude', displayName: 'Claude Code' });
+const CLAUDE = installedClaudePolicy();
 const profile = LIVE ? loadGatewayConfig().deepseek : { apiKey: 'test-deepseek-key' };
 const PREFIX = /^(?:ANTHROPIC_|BAILIAN_|CLAUDE_|CODEX_|DASHSCOPE_|DEEPSEEK_|GLM_|KIMI_|OPENAI_|QWEN_|ULTRATHINK_|ZAI_)/u;
 
@@ -74,7 +74,7 @@ test('DeepSeek V4.1 through installed Claude Workflow: stream, tool execution, a
     // and the complete Workflow launcher/gateway run as installed processes.
     await fsp.writeFile(path.join(bin, 'codex'),
       '#!/usr/bin/env node\n' +
-      'if(process.argv.includes("--version")) console.log("codex-cli 0.153.4");\n' +
+      'if(process.argv.includes("--version")) console.log("codex-cli 0.171.0");\n' +
       'else if(process.argv[2]==="login" && process.argv[3]==="status") console.log("Logged in using ChatGPT");\n' +
       'else process.exit(1);\n', { mode: 0o700 });
 

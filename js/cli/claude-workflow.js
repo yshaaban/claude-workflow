@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 
-import { spawn, spawnSync } from 'node:child_process';
+import { spawn } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
 import process from 'node:process';
@@ -22,10 +22,8 @@ import {
   runDoctorCommand,
   runSetupCommand,
 } from './onboarding.js';
-import {
-  environmentWithoutGatewayAndAnthropicCredentials,
-  environmentWithoutGatewayCredentials,
-} from '../utils/child-env.js';
+import { environmentWithoutGatewayCredentials } from '../utils/child-env.js';
+import { codexCredentialStatus } from '../utils/codex-login.js';
 import {
   CLAUDE_WORKFLOW_MANAGED_SETTINGS_ENV_NAMES,
   buildClaudeSettingsOverrideEnvironment,
@@ -36,10 +34,6 @@ const SIGNAL_NUMBERS = {
   SIGINT: 2,
   SIGTERM: 15,
 };
-const CODEX_LOGIN_STATUS_TIMEOUT_MS = 10_000;
-const CODEX_LOGIN_FAILURE_PATTERN =
-  /not\s+logged\s+in|logged\s+out|not\s+authenticated|not\s+signed\s+in/u;
-const CODEX_LOGIN_SUCCESS_PATTERN = /logged in|authenticated|signed in/u;
 const CLAUDE_OPTIONAL_VALUE_FLAGS = new Set(['--resume', '-r', '--from-pr']);
 const CLAUDE_REQUIRED_VALUE_FLAGS = new Set(['--session-id']);
 const CLAUDE_SESSION_FLAGS = new Set([
@@ -117,25 +111,6 @@ function isExecutableCommand(commandName) {
   }
 
   return false;
-}
-
-function codexLoginReady(commandName) {
-  const isWindows = process.platform === 'win32';
-  const result = spawnSync(commandName, ['login', 'status'], {
-    cwd: process.cwd(),
-    env: environmentWithoutGatewayAndAnthropicCredentials(),
-    encoding: 'utf8',
-    timeout: CODEX_LOGIN_STATUS_TIMEOUT_MS,
-    shell: isWindows,
-  });
-  const output = `${result.stdout || ''}${result.stderr || ''}`.toLowerCase();
-
-  return (
-    result.status === 0 &&
-    !result.error &&
-    !CODEX_LOGIN_FAILURE_PATTERN.test(output) &&
-    CODEX_LOGIN_SUCCESS_PATTERN.test(output)
-  );
 }
 
 function describeGatewayListenError(error, config) {
@@ -382,7 +357,7 @@ function assertPreflight(config, mainRoute) {
     throw new Error(`${claudeVersion.label}: ${claudeVersion.detail}`);
   }
 
-  if (!codexLoginReady(config.codex.command)) {
+  if (!codexCredentialStatus(config.codex.command)) {
     throw new Error(
       `${config.codex.command} is not logged in. Run \`${config.codex.command} login\` first.`
     );

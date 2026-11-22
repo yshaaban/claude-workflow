@@ -20,13 +20,13 @@ import {
   buildClaudeSettingsOverrideEnvironment,
   prepareClaudeThirdPartyModelSupport,
 } from '../js/utils/claude-config.js';
-import { installedCliPolicy } from './helpers/installed-cli-policy.js';
+import { installedClaudePolicy } from './helpers/installed-cli-policy.js';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const CLI = path.join(ROOT, 'js', 'cli', 'claude-workflow.js');
 const DIRECT_MAIN_MODEL_ID = 'codex';
 const DIRECT_RESULT = 'CLEAN_HOME_CODEX_DIRECT_OK';
-const CLAUDE_CLI = installedCliPolicy({ command: 'claude', displayName: 'Claude Code' });
+const CLAUDE_CLI = installedClaudePolicy();
 const WORKFLOW_ENV_PREFIXES = Object.freeze([
   'ANTHROPIC_',
   'CLAUDE_CODE_',
@@ -79,12 +79,12 @@ const args = process.argv.slice(2);
 const logPath = ${JSON.stringify(logPath)};
 
 if (args[0] === '--version') {
-  process.stdout.write('codex-cli 0.153.4\\n');
+  process.stdout.write('codex-cli 0.171.0\\n');
   process.exit(0);
 }
 if (args[0] === 'debug' && args[1] === 'models') {
   process.stdout.write(JSON.stringify({ models: [{
-    slug: 'gpt-6-astra', context_window: 272000, max_context_window: 872000,
+    slug: 'gpt-6.2-astra', context_window: 272000, max_context_window: 872000,
     effective_context_window_percent: 95,
     supported_reasoning_levels: [{ effort: 'max' }],
     experimental_supported_tools: ['send_user_message_async', 'clock']
@@ -129,7 +129,7 @@ input.on('line', function onLine(line) {
       id: message.id,
       result: {
         userAgent:
-          'claude_workflow_gateway/0.153.4 (Linux 6.6; x86_64) ' +
+          'claude_workflow_gateway/0.171.0 (Linux 6.6; x86_64) ' +
           'terminal/1.0.0 (claude_workflow_gateway; 0.1.0)',
       },
     });
@@ -266,7 +266,7 @@ test('direct Codex main generates local client auth and strips it from the Codex
       assert.match(clientEnv.ANTHROPIC_CUSTOM_MODEL_OPTION_NAME, /^Codex /u);
       assert.match(
         clientEnv.ANTHROPIC_CUSTOM_MODEL_OPTION_DESCRIPTION,
-        /^codex:gpt-6-astra\/max through claude-workflow$/u
+        /^codex:gpt-6\.2-astra\/max through claude-workflow$/u
       );
       assert.equal(
         clientEnv.ANTHROPIC_CUSTOM_MODEL_OPTION_SUPPORTED_CAPABILITIES,
@@ -376,7 +376,7 @@ test(
     assert.equal(entries.filter((entry) => entry.event === 'turn').length, 1);
     assert.equal(
       entries.filter((entry) => entry.event === 'thread').every((entry) =>
-        entry.model === 'gpt-6-astra'
+        entry.model === 'gpt-6.2-astra'
       ),
       true
     );

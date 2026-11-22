@@ -1,5 +1,23 @@
 # Changelog
 
+## 0.5.0 - 2026-11-22
+
+- Fable 5.2 coordinates GPT-6.2 Astra agents by default. Select Sol with
+  `--agents sol` or Opus 5.5 with `--main opus`. Existing exact pins stay in
+  place. The supported floor is Claude Code 2.1.325 and Codex CLI 0.171.0.
+  CI also checks Claude Code 2.1.330.
+- Codex uses Claude's built-in and MCP tools directly. Claude executes each
+  call and returns the result to the waiting thread. Simultaneous requests
+  retain their order. User images and image tool results support inline
+  base64. Remote image URLs are rejected.
+- Codex-enabled sessions load MCP schemas up front. The long profile exposes
+  828,400 usable tokens for both GPT-6.2 models. Standard follows the selected
+  model's catalog entry. Direct Chat Completions routes reject GPT-6.2 tool
+  requests with directions to use Codex.
+- The installed-CLI suite checks actual tool advertisements and a Read, Edit,
+  and MCP round trip on a 12,000-line file. The opt-in hosted smoke test checks
+  account access and Claude Read against both models.
+
 ## 0.4.1 - 2026-09-14
 
 ### Fixed

@@ -38,13 +38,17 @@ jobs:
       - run: npm run test:package
 
   upstream-compatibility:
-    name: Supported Claude/Codex compatibility
+    name: Claude ${{ matrix.claude }} / Codex 0.171.0
     runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        claude: ['2.1.325', '2.1.330']
     timeout-minutes: 15
     env:
       CLAUDE_WORKFLOW_REQUIRE_INSTALLED_CLIS: '1'
-      CLAUDE_WORKFLOW_EXPECT_CLAUDE_VERSION: '2.1.261'
-      CLAUDE_WORKFLOW_EXPECT_CODEX_VERSION: '0.153.4'
+      CLAUDE_WORKFLOW_EXPECT_CLAUDE_VERSION: ${{ matrix.claude }}
+      CLAUDE_WORKFLOW_EXPECT_CODEX_VERSION: '0.171.0'
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
@@ -55,6 +59,6 @@ jobs:
       - name: Install supported upstream CLIs
         run: >-
           npm install --global --no-audit --no-fund
-          @anthropic-ai/claude-code@2.1.261
-          @openai/codex@0.153.4
+          @anthropic-ai/claude-code@${{ matrix.claude }}
+          @openai/codex@0.171.0
       - run: npm run -s test:upstream-compatibility

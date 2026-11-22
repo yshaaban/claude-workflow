@@ -10,16 +10,13 @@ import { brotliDecompressSync, gunzipSync, inflateSync } from 'node:zlib';
 
 import { DEFAULT_CODEX_MODEL } from '../js/gateway/config.js';
 import { CodexSessionManager } from '../js/gateway/codex-provider.js';
-import { installedCliPolicy } from './helpers/installed-cli-policy.js';
+import { installedCodexPolicy } from './helpers/installed-cli-policy.js';
 
 const execFileAsync = promisify(execFile);
 const CODEX_COMMAND = process.env.ULTRATHINK_GATEWAY_CODEX_COMMAND || 'codex';
 const MAX_COMMAND_OUTPUT_BYTES = 32 * 1024 * 1024;
 
-const CODEX_PROBE = installedCliPolicy({
-  command: CODEX_COMMAND,
-  displayName: 'Codex CLI',
-});
+const CODEX_PROBE = installedCodexPolicy({ command: CODEX_COMMAND });
 const CODEX_SKIP = CODEX_PROBE.skip;
 
 async function runCodex(args, environment) {
@@ -345,7 +342,6 @@ test(
       selectedModel,
       `${DEFAULT_CODEX_MODEL} must exist in the installed Codex bundled model catalog`
     );
-    assert.equal(selectedModel.slug, 'gpt-6-astra');
     assert.equal(selectedModel.supported_in_api, true);
     assert.deepEqual(selectedModel.truncation_policy, {
       mode: 'tokens',
@@ -393,8 +389,10 @@ test(
   }
 );
 
-['main', 'subagent'].forEach((threadKind) => test(
-  `installed Codex app-server exposes only wrappers and Claude dynamic tools in isolation mode (${threadKind})`,
+const isolatedCases = ['gpt-6.2-astra', 'gpt-6.2-sol'].flatMap((model) =>
+  ['main', 'subagent'].map((threadKind) => ({ model, threadKind })));
+for (const { model, threadKind } of isolatedCases) test(
+  `installed Codex app-server exposes only Claude dynamic tools (${model}, ${threadKind})`,
   { skip: CODEX_SKIP },
   async function installedCodexDynamicToolIsolation(t) {
     const tempRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'codex-installed-isolation-'));
@@ -552,7 +550,7 @@ test(
         forkIdleTimeoutMs: 1_000,
         idleTimeoutMs: 0,
         maxSessions: 1,
-        model: DEFAULT_CODEX_MODEL,
+        model,
         pendingToolTimeoutMs: 5_000,
         sandbox: 'workspace-write',
       },
@@ -573,7 +571,12 @@ test(
         .processRequest(
           request,
           {
-            messages: [{ role: 'user', content: 'Return a short isolation probe response.' }],
+            messages: [{ role: 'user', content: [
+              { type: 'text', text: 'BEFORE_INLINE_IMAGE' },
+              { type: 'image', source: { type: 'base64', media_type: 'image/png',
+                data: 'iVBORw0KGgoAAAANSUhEUgAAACAAAAAgCAIAAAD8GO2jAAAAGUlEQVR4nO3BMQEAAADCoPVP7WENoAAAAG4MIAABt9NlCQAAAABJRU5ErkJggg==' } },
+              { type: 'text', text: 'AFTER_INLINE_IMAGE' },
+            ] }],
             model: 'claude-isolation-contract',
             tools: [
               {
@@ -611,7 +614,7 @@ test(
             reasoningEffort: 'max',
             requestedModel: 'claude-isolation-contract',
             sandbox: 'workspace-write',
-            upstreamModel: DEFAULT_CODEX_MODEL,
+            upstreamModel: model,
             verbosity: 'low',
           }
         )
@@ -624,6 +627,16 @@ test(
       );
       assert.equal(upstreamRequest.method, 'POST');
       assert.match(String(upstreamRequest.url || ''), /\/responses(?:\?|$)/u);
+      assert.equal(payload.model, model);
+      assert.equal(payload.tool_choice, 'auto');
+      const user = payload.input.find((item) => item.role === 'user' &&
+        item.content.some((part) => part.text?.includes('BEFORE_INLINE_IMAGE')));
+      assert.ok(user);
+      const before = user.content.findIndex((part) => part.text?.includes('BEFORE_INLINE_IMAGE'));
+      const image = user.content.findIndex((part) => part.type === 'input_image');
+      const after = user.content.findIndex((part) => part.text?.includes('AFTER_INLINE_IMAGE'));
+      assert.ok(before < image && image < after, JSON.stringify(user.content.map(({type, text}) => ({type, text}))));
+      assert.match(user.content[image].image_url, /^data:image\//u);
 
       const specs = [
         ...(Array.isArray(payload.tools) ? payload.tools : []),
@@ -631,10 +644,8 @@ test(
       ];
       const toolNames = [...new Set(qualifiedToolNames(specs))].sort();
       assert.deepEqual(toolNames, [
-        'functions.exec',
         'functions.ext_tool_001',
         'functions.ext_tool_002',
-        'functions.wait',
       ]);
 
       const serializedRequest = JSON.stringify(payload);
@@ -671,4 +682,4 @@ test(
       await fs.rm(tempRoot, { recursive: true, force: true, maxRetries: 3 });
     }
   }
-));
+);

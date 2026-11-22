@@ -1,5 +1,6 @@
 import {
   DEEPSEEK_FLASH_DEFAULTS,
+  FABLE_MAIN_MODEL_ID,
   GATEWAY_PROVIDER_IDS,
   QWEN_TOKEN_PLAN_DEFAULTS,
   gatewayProviderProfile,
@@ -86,7 +87,7 @@ const VALID_CODEX_APPROVAL_POLICIES = Object.freeze([
 
 const DEFAULT_CODEX_SANDBOX = 'workspace-write';
 const DEFAULT_CODEX_APPROVAL_POLICY = 'never';
-const DEFAULT_ANTHROPIC_PASSTHROUGH_MODELS = Object.freeze(['claude-fable-5-1*']);
+const DEFAULT_ANTHROPIC_PASSTHROUGH_MODELS = Object.freeze([`${FABLE_MAIN_MODEL_ID}*`]);
 const KIMI_REASONING_EFFORT_MAP = Object.freeze({
   light: 'low',
   low: 'low',

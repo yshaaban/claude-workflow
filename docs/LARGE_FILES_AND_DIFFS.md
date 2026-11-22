@@ -20,13 +20,13 @@ Several independent limits apply to one review:
   numbered prefix no larger than 36,000 UTF-8 bytes. It adds machine-readable
   coverage metadata with the exact next 1-based offset. A malformed or
   mismatched notice produces no coverage claim.
-- The Codex CLI 0.153.4 bundled catalog declares a 10,000-token function-output policy.
+- The Codex CLI 0.171.0 bundled catalog declares a 10,000-token function-output policy.
   A single 12,000-line result can therefore be shortened independently of the
   overall context window.
 - A context window counts the complete conversation, including system
   instructions, tool schemas, prior turns, tool results, reasoning, and output
   headroom. The source or diff gets only part of that budget.
-- Codex CLI 0.153.4's bundled GPT-6 Astra model advertises a 272,000-token standard window and an
+- Codex CLI 0.171.0's bundled GPT-6.2 Astra model advertises a 272,000-token standard window and an
   872,000-token maximum through the installed app-server catalog. Codex reserves
   part of that window, leaving 258,400 usable tokens in `standard` mode or
   828,400 in `long` mode. Claude Workflow uses `long` by default and passes the
@@ -76,9 +76,8 @@ Claude Workflow applies the following rules:
    a stale running daemon when installed code, effective user configuration, or
    the selected Node.js or Codex executable changes.
 7. Every workflow Codex thread disables optional native execution environments
-   and integrations. Codex 0.153.4 retains its built-in `functions.exec` and
-   `functions.wait` code-mode control wrappers, while repository reads, writes,
-   searches, and shell commands use Claude-provided dynamic tools. The same
+   and integrations. Repository reads, writes, searches, and shell commands
+   use Claude-provided dynamic tools. The same
    boundary applies to per-session and shared gateways.
    A private catalog snapshot suppresses native async-question and clock tools
    that model metadata enables independently of feature flags. Experimental

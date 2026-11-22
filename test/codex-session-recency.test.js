@@ -3,6 +3,14 @@ import test from 'node:test';
 
 import { CodexSessionManager } from '../js/gateway/codex-provider.js';
 
+test('a deferred placeholder fails before starting a Codex thread', async () => {
+  const manager = new CodexSessionManager({ codex: { maxSessions: 1 } });
+  const body = { tools: [{ name: 'DeferredToolPlaceholder', defer_loading: true }] };
+  assert.throws(() => manager.ensureSession({}, body, {}), /ENABLE_TOOL_SEARCH=false/u);
+  assert.equal(manager.sessions.size, 0);
+  await manager.close();
+});
+
 function idleSession(sessionKey, closed) {
   return {
     sessionKey,

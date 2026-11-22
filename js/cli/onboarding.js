@@ -7,7 +7,10 @@ import process from 'node:process';
 import { fileURLToPath } from 'node:url';
 
 import { unsafeWslInstallPaths } from '../../scripts/validate-local-install.mjs';
-import { resolveCodexCapabilities } from '../gateway/codex-capabilities.js';
+import {
+  CODEX_MODEL_ALIASES,
+  resolveCodexCapabilities,
+} from '../gateway/codex-capabilities.js';
 import {
   DEFAULT_CODEX_MODEL,
   envFlag,
@@ -32,7 +35,10 @@ import {
 import {
   CLAUDE_WORKFLOW_MANAGED_SETTINGS_ENV_NAMES,
 } from '../utils/claude-config.js';
+import { codexCredentialStatus } from '../utils/codex-login.js';
+import { MINIMUM_CLAUDE_VERSION, MINIMUM_CODEX_VERSION, versionAtLeast } from '../utils/cli-versions.js';
 import {
+  anthropicModelLabel,
   buildWorkflowGatewayConfig,
   defaultWorkflowAnthropicPassthroughModels,
   DEFAULT_SUBAGENT_REASONING_EFFORT,
@@ -48,8 +54,6 @@ import {
 const COMMAND_TIMEOUT_MS = 10_000;
 const CONFIG_LOCK_TIMEOUT_MS = 5_000;
 const CONFIG_LOCK_POLL_MS = 25;
-const MINIMUM_CLAUDE_VERSION = Object.freeze([2, 1, 261]);
-const MINIMUM_CODEX_VERSION = Object.freeze([0, 153, 4]);
 const CONFIG_FILE_NAME = '.claude-workflow.env';
 const SAFE_CONFIG_VALUE = /^[A-Za-z0-9._:/[\]-]+$/u;
 const REASONING_EFFORTS = new Set([
@@ -61,14 +65,6 @@ const REASONING_EFFORTS = new Set([
   'max',
   'ultra',
 ]);
-// Codex tiers do not all advance to the same model generation. Resolve aliases
-// explicitly so switching from Astra to Terra never invents gpt-6-terra.
-const AGENT_MODEL_ALIASES = Object.freeze({
-  astra: 'gpt-6-astra',
-  sol: 'gpt-5.6-sol',
-  terra: 'gpt-5.6-terra',
-  luna: 'gpt-5.6-luna',
-});
 const PERMISSION_MODES = new Set(['bypass', 'prompt']);
 const CONTEXT_PROFILES = new Set(['standard', 'long']);
 const MAIN_PRESETS = Object.freeze({
@@ -89,9 +85,6 @@ const MAIN_PRESETS = Object.freeze({
 const SHELL_ROUTING_ENV_NAMES = Object.freeze([
   ...CLAUDE_WORKFLOW_MANAGED_SETTINGS_ENV_NAMES,
 ]);
-const CODEX_LOGIN_FAILURE_PATTERN =
-  /not\s+logged\s+in|logged\s+out|not\s+authenticated|not\s+signed\s+in/iu;
-const CODEX_LOGIN_SUCCESS_PATTERN = /logged in|authenticated|signed in/iu;
 const MANAGED_CONFIG_KEYS = Object.freeze([
   'ULTRATHINK_GATEWAY_MAIN_MODEL_ID',
   'ULTRATHINK_GATEWAY_MAIN_PROVIDER',
@@ -324,18 +317,6 @@ function nodeCheck() {
   };
 }
 
-function versionAtLeast(actual, required) {
-  for (let index = 0; index < required.length; index += 1) {
-    if (actual[index] > required[index]) {
-      return true;
-    }
-    if (actual[index] < required[index]) {
-      return false;
-    }
-  }
-  return true;
-}
-
 export function checkClaudeVersion(run = commandResult, env = process.env) {
   if (!findExecutable('claude', env)) {
     return {
@@ -360,13 +341,12 @@ export function checkClaudeVersion(run = commandResult, env = process.env) {
   const version = (commandOutput(versionResult).split(/\r?\n/u)[0] || 'installed')
     .replace(/\s*\(Claude Code\)\s*$/iu, '')
     .trim();
-  const versionParts = version.match(/(\d+)\.(\d+)\.(\d+)/u)?.slice(1).map(Number);
-  if (!versionParts || !versionAtLeast(versionParts, MINIMUM_CLAUDE_VERSION)) {
+  if (!versionAtLeast(version, MINIMUM_CLAUDE_VERSION)) {
     return {
       ok: false,
       label: `Claude Code ${version}`,
       detail:
-        'Claude Workflow requires Claude Code 2.1.261 or newer. Update Claude Code and try again.',
+        `Claude Workflow requires Claude Code ${MINIMUM_CLAUDE_VERSION.join('.')} or newer. Update Claude Code and try again.`,
     };
   }
 
@@ -473,23 +453,16 @@ function codexCheck(commandName, run = commandResult, env = process.env) {
   const version = (commandOutput(versionResult).split(/\r?\n/u)[0] || 'installed')
     .replace(/^codex-cli\s+/iu, '')
     .trim();
-  const versionParts = version.match(/(\d+)\.(\d+)\.(\d+)/u)?.slice(1).map(Number);
-  if (!versionParts || !versionAtLeast(versionParts, MINIMUM_CODEX_VERSION)) {
+  if (!versionAtLeast(version, MINIMUM_CODEX_VERSION)) {
     return {
       ok: false,
       label: `Codex CLI ${version}`,
-      detail: 'Claude Workflow requires Codex CLI 0.153.4 or newer. Update Codex and try again.',
+      detail: `Claude Workflow requires Codex CLI ${MINIMUM_CODEX_VERSION.join('.')} or newer. Update Codex and try again.`,
     };
   }
-  const authResult = run(commandName, ['login', 'status'], { env });
-  const authOutput = commandOutput(authResult).toLowerCase();
-  const loggedIn =
-    authResult.status === 0 &&
-    !authResult.error &&
-    !CODEX_LOGIN_FAILURE_PATTERN.test(authOutput) &&
-    CODEX_LOGIN_SUCCESS_PATTERN.test(authOutput);
-  return loggedIn
-    ? { ok: true, label: `Codex CLI ${version} (authenticated)` }
+  const status = codexCredentialStatus(commandName, run, env);
+  return status
+    ? { ok: true, label: `Codex CLI ${version} (${status})` }
     : {
         ok: false,
         label: `Codex CLI ${version}`,
@@ -498,15 +471,8 @@ function codexCheck(commandName, run = commandResult, env = process.env) {
 }
 
 function friendlyMainName(modelId) {
-  if (/^claude-fable-5-1(?:-|\[|$)/u.test(modelId)) {
-    return 'Fable 5.1';
-  }
-  if (/^claude-opus-5(?:\[|$)/u.test(modelId)) {
-    return 'Opus 5';
-  }
-  if (/^claude-fable-5(?:\[|$)/u.test(modelId)) {
-    return 'Fable 5';
-  }
+  const label = anthropicModelLabel(modelId);
+  if (label) return label;
   if (/^k3(?:\[|$)/u.test(modelId)) {
     return 'Kimi K3';
   }
@@ -926,8 +892,8 @@ function normalizeModel(value, label) {
 function agentModel(value) {
   const trimmed = String(value || '').trim();
   const normalized = trimmed.toLowerCase();
-  return Object.hasOwn(AGENT_MODEL_ALIASES, normalized)
-    ? AGENT_MODEL_ALIASES[normalized]
+  return Object.hasOwn(CODEX_MODEL_ALIASES, normalized)
+    ? CODEX_MODEL_ALIASES[normalized]
     : normalizeModel(trimmed, '--agents');
 }
 

@@ -19,9 +19,9 @@ import {
   createPrivateClaudeSettingsOverride,
   prepareClaudeThirdPartyModelSupport,
 } from '../js/utils/claude-config.js';
-import { installedCliPolicy } from './helpers/installed-cli-policy.js';
+import { installedClaudePolicy } from './helpers/installed-cli-policy.js';
 
-const CLAUDE_CLI = installedCliPolicy({ command: 'claude', displayName: 'Claude Code' });
+const CLAUDE_CLI = installedClaudePolicy();
 const QWEN_API_KEY = 'sk-sp-test-installed-claude-qwen-key';
 const WORKFLOW_PREFIXES = Object.freeze([
   'ANTHROPIC_',

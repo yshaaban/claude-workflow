@@ -426,7 +426,7 @@ test('Kimi client settings follow only the resolved main route', async function 
         workflow.subagentModelId,
         workflow.mainModelId
       );
-      assert.equal(workflow.mainModelId, 'claude-fable-5-1');
+      assert.equal(workflow.mainModelId, 'claude-fable-5-2');
       assert.equal(clientEnv.CLAUDE_CODE_MAX_CONTEXT_TOKENS, '828400');
       assert.equal(clientEnv.CLAUDE_CODE_AUTO_COMPACT_WINDOW, '784800');
       assert.equal(clientEnv.CLAUDE_CODE_EFFORT_LEVEL, null);

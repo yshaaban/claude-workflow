@@ -17,20 +17,20 @@ import {
   createPrivateClaudeSettingsOverride,
 } from '../js/utils/claude-config.js';
 import { CLAUDE_TERMINAL_TITLE_ENV_NAME, environmentWithoutManagedWorkflowEnvironment } from '../js/utils/child-env.js';
-import { installedCliPolicy } from './helpers/installed-cli-policy.js';
+import { installedClaudePolicy } from './helpers/installed-cli-policy.js';
 
-const CLAUDE_CLI = installedCliPolicy({ command: 'claude', displayName: 'Claude Code' });
-const MODEL = 'claude-fable-5-1';
+const CLAUDE_CLI = installedClaudePolicy();
+const MODEL = 'claude-fable-5-2';
 const RESULT = 'FABLE_NATIVE_TOOL_LOOP_OK';
 
 function fakeCodexCommand(logPath) {
   return `#!/usr/bin/env node
 const fs = require('node:fs');
 const readline = require('node:readline');
-if (process.argv[2] === '--version') { process.stdout.write('codex-cli 0.153.4\\n'); process.exit(0); }
+if (process.argv[2] === '--version') { process.stdout.write('codex-cli 0.171.0\\n'); process.exit(0); }
 if (process.argv[2] === 'debug' && process.argv[3] === 'models') {
   process.stdout.write(JSON.stringify({ models: [{
-    slug: 'gpt-6-astra', display_name: 'GPT-6 Astra',
+    slug: 'gpt-6.2-astra', display_name: 'GPT-6.2 Astra',
     context_window: 272000, max_context_window: 872000,
     supported_reasoning_levels: ['low', 'medium', 'high', 'xhigh', 'max', 'ultra'].map(effort => ({ effort })),
     experimental_supported_tools: ['send_user_message_async', 'clock'],
@@ -44,7 +44,7 @@ const log = value => fs.appendFileSync(${JSON.stringify(logPath)}, JSON.stringif
 readline.createInterface({ input: process.stdin }).on('line', line => {
   const message = JSON.parse(line);
   if (message.method === 'initialize') {
-    send({ id: message.id, result: { userAgent: 'claude_workflow_gateway/0.153.4' } });
+    send({ id: message.id, result: { userAgent: 'claude_workflow_gateway/0.171.0' } });
   } else if (message.method === 'config/read') {
     send({ id: message.id, result: { layers: [] } });
   } else if (message.method === 'thread/start') {
@@ -198,7 +198,6 @@ async function nativeFixture(t, reply, options = {}) {
       await fsp.chmod(codexCommand, 0o755);
     }
     const workflow = withEnvironment(isolatedEnvironment({
-      ULTRATHINK_GATEWAY_MAIN_MODEL_ID: MODEL,
       ULTRATHINK_GATEWAY_SHARED_SECRET: 'test-local-fable-key',
       ULTRATHINK_GATEWAY_ANTHROPIC_API_KEY: 'test-upstream-fable-key',
       ULTRATHINK_GATEWAY_ANTHROPIC_BASE_URL: `http://127.0.0.1:${upstream.address().port}`,
@@ -211,9 +210,8 @@ async function nativeFixture(t, reply, options = {}) {
     const gateway = createGatewayServer(config);
     if (!gateway.server.listening) await once(gateway.server, 'listening');
     t.after(() => gateway.close());
-    const clientEnv = buildWorkflowClientEnv(
-      config, `http://127.0.0.1:${gateway.server.address().port}`, subagentModelId, mainModelId
-    );
+    const clientPort = options.direct ? upstream.address().port : gateway.server.address().port;
+    const clientEnv = buildWorkflowClientEnv(config, `http://127.0.0.1:${clientPort}`, subagentModelId, mainModelId);
     const env = isolatedEnvironment({
       HOME: fixtureHome,
       USERPROFILE: fixtureHome,
@@ -231,7 +229,7 @@ async function nativeFixture(t, reply, options = {}) {
     }
     const settings = createPrivateClaudeSettingsOverride(
       buildClaudeSettingsOverrideEnvironment(clientEnv, env),
-      { options: [{ model: mainModelId, label: 'Fable 5.1' }, { model: subagentModelId, label: 'Codex' }], replaceBuiltInOptions: true }
+      buildWorkflowModelPicker(config, mainModelId, subagentModelId)
     );
     t.after(() => settings.cleanup());
     await fsp.mkdir(env.CLAUDE_CONFIG_DIR, { recursive: true });
@@ -240,7 +238,7 @@ async function nativeFixture(t, reply, options = {}) {
       ...options.settings,
     }));
     return {
-      clientEnv, codexLog, config, fixtureFile, paths, requests, subagentModelId,
+      clientEnv, codexLog, config, fixtureFile, paths, requests, root, subagentModelId,
       userSettingsPath: path.join(env.CLAUDE_CONFIG_DIR, 'settings.json'),
       run(prompt) {
         return runClaude([
@@ -255,9 +253,9 @@ async function nativeFixture(t, reply, options = {}) {
     };
 }
 
-test('installed Claude uses native Fable 5.1 adaptive thinking and replays a tool turn through the gateway',
+test('installed Claude uses native Fable adaptive thinking and replays a tool turn through the default gateway',
   { skip: CLAUDE_CLI.skip }, async function (t) {
-    const thinking = { type: 'thinking', thinking: '', signature: 'opaque-fable-5-1-prefix-signature' };
+    const thinking = { type: 'thinking', thinking: '', signature: 'opaque-fable-prefix-signature' };
     let tool;
     const fixture = await nativeFixture(t, (response, body, { fixtureFile, requests }) => {
       tool = { type: 'tool_use', id: 'toolu_native_fable', name: 'Read', input: { file_path: fixtureFile } };
@@ -289,26 +287,31 @@ test('installed Claude uses native Fable 5.1 adaptive thinking and replays a too
     assert.equal(paths.some((entry) => entry.endsWith('/models')), false);
   });
 
-for (const [category, expectedModel] of [['bio', 'claude-opus-5'], ['cyber', 'claude-opus-4-8']]) {
-  test(`installed Claude preserves the native Fable ${category} fallback on Anthropic`,
+for (const category of ['bio', 'cyber', 'general_harms']) {
+  test(`installed Claude preserves native refusal handling for ${category} through the gateway`,
     { skip: CLAUDE_CLI.skip }, async function (t) {
-      const fixture = await nativeFixture(t, (response, body, { requests }) => {
-        if (requests.length === 1) {
-          respondWithMessage(response, body, [], 'refusal', {
-            type: 'refusal', category, explanation: 'Synthetic classifier refusal for an account-free compatibility test.',
-          });
-        } else {
-          respondWithMessage(response, body, [{ type: 'text', text: RESULT }], 'end_turn');
-        }
+      const refuse = (response, body) => respondWithMessage(response, body, [], 'refusal', {
+        type: 'refusal', category, explanation: 'Synthetic refusal for an account-free compatibility test.',
       });
-      const result = await fixture.run(`Reply with exactly ${RESULT}.`);
-      assert.equal(result.signal, null, result.stderr || result.stdout);
-      assert.equal(result.status, 0, result.stderr || result.stdout);
-      assert.match(result.stdout, new RegExp(RESULT, 'u'));
-      assert.deepEqual(fixture.requests.map((request) => request.model), [MODEL, expectedModel]);
-      assert.equal(fixture.clientEnv.ANTHROPIC_DEFAULT_OPUS_MODEL, 'claude-opus-5');
-      assert.equal(fixture.clientEnv.CLAUDE_CODE_SUBAGENT_MODEL, fixture.subagentModelId);
-      assert.equal(fixture.clientEnv.CLAUDE_CODE_SUBAGENT_MODEL_FORCE, '1');
+      // Claude's response to a refusal varies by release. Compare against the
+      // same CLI pointed directly at the synthetic Anthropic endpoint.
+      const paths = await Promise.all([true, false].map(async (direct) => {
+        const fixture = await nativeFixture(t, refuse, { direct });
+        const result = await fixture.run('Return a test marker.');
+        assert.equal(result.signal, null, result.stderr || result.stdout);
+        assert.equal(result.status, 1, result.stderr || result.stdout);
+        const output = JSON.parse(result.stdout);
+        assert.equal(output.is_error, true);
+        assert.equal(output.stop_reason, 'refusal');
+        assert.equal(fixture.requests[0]?.model, MODEL);
+        // A new Claude release can choose a same-model safety reminder. Do not
+        // confuse that with an extra gateway inference or strip the reminder.
+        return fixture.requests.map(({ model, messages }) => ({
+          model,
+          lastMessage: JSON.stringify(messages.at(-1).content).replaceAll(path.basename(fixture.root), '<fixture>'),
+        }));
+      }));
+      assert.deepEqual(paths[1], paths[0], 'gateway must not add, change, or suppress a provider call');
     });
 }
 
@@ -344,25 +347,9 @@ test('installed Claude keeps an explicitly Opus-pinned subagent at Codex max whi
     assert.match(JSON.stringify(resultBlock.content), /NATIVE_CODEX_AGENT_OK/u);
     const agentEvents = (await fsp.readFile(fixture.codexLog, 'utf8')).trim().split('\n').map((line) => JSON.parse(line));
     assert.deepEqual(agentEvents, [
-      { event: 'thread', model: 'gpt-6-astra' },
+      { event: 'thread', model: 'gpt-6.2-astra' },
       { event: 'turn', effort: 'max' },
     ]);
-  });
-
-test('installed Claude preserves refusals that have no native category fallback',
-  { skip: CLAUDE_CLI.skip }, async function (t) {
-    const fixture = await nativeFixture(t, (response, body) => {
-      respondWithMessage(response, body, [], 'refusal', {
-        type: 'refusal', category: 'general_harms', explanation: 'Synthetic refusal with no configured fallback.',
-      });
-    });
-    const result = await fixture.run('Return a test marker.');
-    assert.equal(result.signal, null, result.stderr || result.stdout);
-    assert.equal(result.status, 1, result.stderr || result.stdout);
-    const body = JSON.parse(result.stdout);
-    assert.equal(body.stop_reason, 'refusal');
-    assert.equal(body.is_error, true);
-    assert.equal(fixture.requests.length, 1, 'no fallback is invented for an unmapped category');
   });
 
 test('installed Claude can enable ultracode without a workflow effort override',
@@ -378,7 +365,7 @@ test('installed Claude can enable ultracode without a workflow effort override',
     const result = await fixture.run('/effort ultracode');
     assert.equal(result.status, 0, result.stderr || result.stdout);
     assert.doesNotMatch(result.stdout + result.stderr, /CLAUDE_CODE_EFFORT_LEVEL=.*overrides/u);
-    assert.match(result.stdout, /Set effort level to ultracode/u);
+    assert.match(JSON.parse(result.stdout).result, /^(?:Ultracode on\b|Set effort level to ultracode\b)/iu);
     assert.equal(fixture.requests.length, 0, 'the native effort command needs no inference');
     assert.equal(resolveModelRoute(fixture.subagentModelId, fixture.config).reasoningEffort, 'max');
     assert.equal(await fsp.readFile(fixture.userSettingsPath, 'utf8'), before);
@@ -388,7 +375,10 @@ test('installed Claude honors a native saved effort without adopting the Codex e
   { skip: CLAUDE_CLI.skip }, async function (t) {
     const fixture = await nativeFixture(t, (response, body) => {
       respondWithMessage(response, body, [{ type: 'text', text: RESULT }], 'end_turn');
-    }, { effort: null, settings: { effortLevel: 'high' } });
+    }, {
+      effort: null,
+      settings: { effortLevel: 'low', modelSettings: { [MODEL]: { effortLevel: 'high' } } },
+    });
     const result = await fixture.run(`Reply with exactly ${RESULT}.`);
     assert.equal(result.status, 0, result.stderr || result.stdout);
     assert.equal(fixture.requests.length, 1);
@@ -425,7 +415,7 @@ function workflowForTest(extra = {}) {
 test('workflow fallback defaults are exact, preserve picker scope, and do not change non-Anthropic routes', function () {
   const { config, mainModelId, subagentModelId } = workflowForTest();
   assert.deepEqual(config.anthropicPassthroughModels, [
-    'claude-fable-5-1*', 'claude-opus-5', 'claude-opus-5[1m]', 'claude-opus-4-8', 'claude-opus-4-8[1m]',
+    'claude-fable-5-2*', 'claude-opus-5', 'claude-opus-5[1m]', 'claude-opus-4-8', 'claude-opus-4-8[1m]',
   ]);
   for (const model of ['claude-opus-5', 'claude-opus-4-8']) {
     for (const alias of [model, `${model}[1m]`]) {
@@ -453,7 +443,7 @@ test('workflow refuses conflicting native fallback overrides without replacing o
   ]) {
     assert.throws(() => workflowForTest({ ULTRATHINK_GATEWAY_ROUTE_MAP_JSON: JSON.stringify(routeMap) }), /Native fallback.*route unchanged to Anthropic/u);
   }
-  assert.throws(() => workflowForTest({ ULTRATHINK_GATEWAY_ANTHROPIC_PASSTHROUGH_MODELS: 'claude-fable-5-1*' }), /Native fallback.*route unchanged to Anthropic/u);
+  assert.throws(() => workflowForTest({ ULTRATHINK_GATEWAY_ANTHROPIC_PASSTHROUGH_MODELS: 'claude-fable-5-2*' }), /Native fallback.*route unchanged to Anthropic/u);
   const explicitRoutes = {
     'claude-opus-5*': { provider: 'anthropic', model: 'claude-opus-5', displayName: 'Operator fallback' },
     'claude-opus-4-8*': { provider: 'anthropic', model: 'claude-opus-4-8' },
@@ -464,6 +454,39 @@ test('workflow refuses conflicting native fallback overrides without replacing o
     ULTRATHINK_GATEWAY_ROUTE_MAP_JSON: JSON.stringify(explicitRoutes),
   });
   for (const [model, route] of Object.entries(explicitRoutes)) assert.deepEqual(explicit.config.routeMap[model], route);
+});
+
+test('Claude coordinator pins keep their exact version, native targets, and model-picker labels', function () {
+  for (const [model, family, label, targets] of [
+    ['claude-fable-5-2', 'FABLE', 'Fable 5.2', ['claude-opus-5', 'claude-opus-4-8']],
+    ['claude-fable-5-1[1m]', 'FABLE', 'Fable 5.1', ['claude-opus-5', 'claude-opus-4-8']],
+    ['claude-opus-5-5', 'OPUS', 'Opus 5.5', ['claude-opus-5', 'claude-opus-4-8']],
+    ['claude-opus-5', 'OPUS', 'Opus 5', ['claude-opus-4-8']],
+    ['claude-sonnet-5-5', 'SONNET', 'Sonnet 5.5', ['claude-sonnet-5']],
+    ['claude-haiku-5-5', 'HAIKU', 'Haiku 5.5', []],
+  ]) {
+    const { config, mainModelId, subagentModelId } = workflowForTest({ ULTRATHINK_GATEWAY_MAIN_MODEL_ID: model });
+    assert.equal(mainModelId, model);
+    const picker = buildWorkflowModelPicker(config, mainModelId, subagentModelId);
+    assert.equal(picker.options[0].label, label);
+    const main = resolveModelRoute(mainModelId, config);
+    assert.equal(main.provider, 'anthropic');
+    assert.equal(main.upstreamModel, model.replace('[1m]', ''));
+    const env = buildWorkflowClientEnv(config, 'http://127.0.0.1', subagentModelId, mainModelId);
+    assert.equal(env[`ANTHROPIC_DEFAULT_${family}_MODEL`], model);
+    assert.equal(resolveModelRoute(subagentModelId, config).provider, 'codex');
+    for (const target of targets) {
+      for (const alias of [target, `${target}[1m]`]) {
+        const route = resolveModelRoute(alias, config);
+        assert.equal(route.provider, 'anthropic');
+        assert.equal(route.upstreamModel, target);
+      }
+    }
+  }
+  assert.throws(() => workflowForTest({
+    ULTRATHINK_GATEWAY_MAIN_MODEL_ID: 'claude-sonnet-5-5',
+    ULTRATHINK_GATEWAY_SUBAGENT_MODEL_ID: 'claude-sonnet-5',
+  }), /Native fallback.*route unchanged to Anthropic/u);
 });
 
 test('forced agent routing is managed in settings and restored by session and shell cleanup',

@@ -7,12 +7,14 @@ import { fileURLToPath } from 'node:url';
 
 import {
   INSTALLED_CLI_REQUIRED_ENV_NAME,
-  installedCliPolicy,
+  installedClaudePolicy,
+  installedCodexPolicy,
 } from './helpers/installed-cli-policy.js';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const CONTRACT_FILES = Object.freeze([
   'test/codex-appserver-installed-contract.test.js',
+  'test/installed-codex-tool-loop.test.js',
   'test/installed-claude-codex.test.js',
   'test/installed-claude-deepseek.test.js',
   'test/installed-claude-fable.test.js',
@@ -42,15 +44,12 @@ function main() {
     ...process.env,
     [INSTALLED_CLI_REQUIRED_ENV_NAME]: '1',
   };
-  const claude = installedCliPolicy({
-    command: 'claude',
-    displayName: 'Claude Code',
+  const claude = installedClaudePolicy({
     env: requiredEnvironment,
   });
   const codexCommand = process.env.ULTRATHINK_GATEWAY_CODEX_COMMAND || 'codex';
-  const codex = installedCliPolicy({
+  const codex = installedCodexPolicy({
     command: codexCommand,
-    displayName: 'Codex CLI',
     env: requiredEnvironment,
   });
 

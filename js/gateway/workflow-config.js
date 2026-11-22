@@ -22,6 +22,8 @@ import {
 import { proxyExclusionEnvForHost } from './proxy.js';
 import {
   DEEPSEEK_FLASH_DEFAULTS,
+  FABLE_MAIN_MODEL_ID,
+  OPUS_MAIN_MODEL_ID,
   QWEN_TOKEN_PLAN_DEFAULTS,
   providerRequiresGatewayAuth,
 } from './provider-profiles.js';
@@ -64,11 +66,8 @@ const MANAGED_PROVIDER_CLIENT_ENV_NAMES = Object.freeze([
   'CLAUDE_CODE_EFFORT_LEVEL',
   'CLAUDE_CODE_MAX_CONTEXT_TOKENS',
 ]);
-// Opus 5 and Fable 5.1 expose their 1M windows natively. Keeping the canonical
-// API IDs avoids a redundant client-only qualifier and survives model-picker
-// and resume round trips unchanged.
-export const OPUS_MAIN_MODEL_ID = 'claude-opus-5';
-export const FABLE_MAIN_MODEL_ID = 'claude-fable-5-1';
+export { FABLE_MAIN_MODEL_ID, OPUS_MAIN_MODEL_ID };
+const NATIVE_OPUS_TARGET = 'claude-opus-5';
 export const DEFAULT_MAIN_MODEL_ID = FABLE_MAIN_MODEL_ID;
 export const DEFAULT_SUBAGENT_REASONING_EFFORT = 'max';
 export const KIMI_MAIN_MODEL_ID = 'k3';
@@ -101,10 +100,13 @@ function defaultAnthropicPassthroughPattern(mainModelId) {
 
 function nativeAnthropicFallbackModels(mainModelId) {
   const model = modelIdWithoutBracketQualifiers(mainModelId);
-  // Keep the documented category-specific targets, not a broad Opus family
-  // wildcard that could silently opt future models into Anthropic routing.
-  if (/^claude-fable-5(?:-1)?(?:-\d{8})?$/u.test(model)) {
-    return [OPUS_MAIN_MODEL_ID, 'claude-opus-4-8'];
+  // Reserve only documented targets on Anthropic. Claude, not this gateway,
+  // decides whether to use them.
+  if (/^claude-(?:fable-5(?:-[12])?|opus-5-5)(?:-\d{8})?$/u.test(model)) {
+    return [NATIVE_OPUS_TARGET, 'claude-opus-4-8'];
+  }
+  if (/^claude-sonnet-5-5(?:-\d{8})?$/u.test(model)) {
+    return ['claude-sonnet-5'];
   }
   if (/^claude-opus-5(?:-\d{8})?$/u.test(model)) {
     return ['claude-opus-4-8'];
@@ -435,10 +437,6 @@ export function buildWorkflowGatewayConfig({
           normalizedMainModelId
         )
       : normalizedMainModelId;
-  const rawSubagentModelId = envString(
-    'ULTRATHINK_GATEWAY_SUBAGENT_MODEL_ID',
-    'claude-sonnet-5'
-  );
   const subagentUpstreamModel = envString(
     'ULTRATHINK_GATEWAY_SUBAGENT_UPSTREAM_MODEL',
     baseConfig.codex.model
@@ -501,6 +499,19 @@ export function buildWorkflowGatewayConfig({
         )}; remove the conflicting route-map alias`
     );
   }
+  const nativeFallbackModels = routeProvider(configuredMainRoute, mainProvider) === 'anthropic'
+    ? nativeAnthropicFallbackModels(mainModelId)
+    : [];
+  // The historical subagent alias must not claim a coordinator or one of
+  // Claude's own Anthropic targets (notably Sonnet 5 for Sonnet 5.5).
+  const legacyAgentAlias = 'claude-sonnet-5';
+  const rawSubagentModelId = envString(
+    'ULTRATHINK_GATEWAY_SUBAGENT_MODEL_ID',
+    nativeFallbackModels.includes(legacyAgentAlias) ||
+      modelIdWithoutBracketQualifiers(mainModelId) === legacyAgentAlias
+      ? 'codex'
+      : legacyAgentAlias
+  );
   const configuredRawSubagentRoute = configuredRouteMapEntry(
     rawSubagentModelId,
     baseConfig
@@ -634,13 +645,10 @@ export function buildWorkflowGatewayConfig({
   ) {
     return providerRequiresGatewayAuth(routeProvider(route, ''));
   });
-  // Native Claude fallback selects exact Opus IDs, independently of agent
+  // Native Claude fallback selects exact model IDs, independently of agent
   // routing. Keep those targets on Anthropic along with the main family.
   // User passthrough lists and route-map entries retain precedence; validate
   // them below instead of silently replacing an incompatible override.
-  const nativeFallbackModels = resolvedMainProvider === 'anthropic'
-    ? nativeAnthropicFallbackModels(mainModelId)
-    : [];
   const passthroughEnvProvided =
     envString('ULTRATHINK_GATEWAY_ANTHROPIC_PASSTHROUGH_MODELS') !== '' ||
     envString('ULTRATHINK_GATEWAY_PASSTHROUGH_MODEL_IDS') !== '';
@@ -758,14 +766,21 @@ export function buildWorkflowClientEnv(
 
   const mainRoute = resolveModelRoute(mainModelId, config);
   const subagentRoute = resolveModelRoute(subagentModelId, config);
+  if ([mainRoute, subagentRoute].some(route => route.provider === 'codex') || routeMapUsesProvider(config, 'codex')) {
+    // app-server 0.171 takes dynamicTools only on thread/start. Claude must
+    // send the schemas before inference, including those from stdio MCP servers.
+    clientEnv.ENABLE_TOOL_SEARCH = 'false';
+    clientEnv.MCP_CONNECTION_NONBLOCKING = '0';
+  }
   if (
     mainRoute.provider === 'anthropic' &&
-    nativeAnthropicFallbackModels(mainModelId).includes(OPUS_MAIN_MODEL_ID)
+    modelIdWithoutBracketQualifiers(mainModelId).startsWith('claude-fable-') &&
+    nativeAnthropicFallbackModels(mainModelId).includes(NATIVE_OPUS_TARGET)
   ) {
     // Claude validates this alias before arming Fable's native refusal
     // fallback. The force flag below keeps explicit Opus-pinned agents on
     // the configured agent model without disguising the fallback as Codex.
-    clientEnv.ANTHROPIC_DEFAULT_OPUS_MODEL = OPUS_MAIN_MODEL_ID;
+    clientEnv.ANTHROPIC_DEFAULT_OPUS_MODEL = NATIVE_OPUS_TARGET;
   }
   const routedContextContracts = [mainRoute, subagentRoute]
     .map((route) => routeContextContract(config, route))
@@ -813,7 +828,8 @@ export function buildWorkflowClientEnv(
   }
 
   // Keep Claude's session effort independent of the Codex route. An effort
-  // environment variable overrides /effort, including ultracode's xhigh mode.
+  // environment variable overrides /effort. Leave ultracode and native
+  // session effort controls to the installed Claude release.
   // Leave the managed null above intact so stale shell/settings pins are
   // cleared. Do not use "auto" or "unset": Claude treats those as overrides
   // too. Codex still receives its exact configured route effort. Kimi/Qwen
@@ -880,6 +896,14 @@ function customModelSupportedCapabilities(config, route) {
   return capabilities.join(',');
 }
 
+export function anthropicModelLabel(modelId) {
+  const normalized = modelIdWithoutBracketQualifiers(modelId);
+  const match = /^claude-(fable|opus|sonnet|haiku)-(\d+)(?:-(\d{1,2}))?(?:-\d{8})?$/u.exec(normalized);
+  if (!match) return '';
+  const [, family, major, minor] = match;
+  return `${family[0].toUpperCase()}${family.slice(1)} ${major}${minor ? `.${minor}` : ''}`;
+}
+
 function modelPickerLabel(modelId, route) {
   const provider = routeProvider(route, '');
   if (provider === 'codex') {
@@ -895,17 +919,8 @@ function modelPickerLabel(modelId, route) {
     return 'DeepSeek V4.1 Flash';
   }
   if (provider === 'anthropic') {
-    const normalized = modelIdWithoutBracketQualifiers(modelId);
-    for (const [pattern, label] of [
-      [/^claude-fable-5-1(?:-|$)/u, 'Fable 5.1'],
-      [/^claude-fable-5(?:-|$)/u, 'Fable 5'],
-      [/^claude-opus-5(?:-|$)/u, 'Opus 5'],
-      [/^claude-sonnet-5(?:-|$)/u, 'Sonnet 5'],
-    ]) {
-      if (pattern.test(normalized)) {
-        return label;
-      }
-    }
+    const label = anthropicModelLabel(modelId);
+    if (label) return label;
   }
   return route.displayName || modelId;
 }
@@ -981,13 +996,8 @@ function routeMapUsesProvider(config, provider) {
 
 function mainModelAliasSlotName(mainModelId) {
   const normalized = String(mainModelId || '').trim();
-  if (normalized.startsWith('claude-opus-')) {
-    return 'ANTHROPIC_DEFAULT_OPUS_MODEL';
-  }
-  if (normalized.startsWith('claude-fable-')) {
-    return 'ANTHROPIC_DEFAULT_FABLE_MODEL';
-  }
-  return '';
+  const family = /^claude-(opus|fable|sonnet|haiku)-/u.exec(normalized)?.[1];
+  return family ? `ANTHROPIC_DEFAULT_${family.toUpperCase()}_MODEL` : '';
 }
 
 export function buildWorkflowClaudeEnv(

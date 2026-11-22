@@ -77,7 +77,7 @@ test('Codex Astra fallback exposes the app-server window, not the API marketing 
   ]) {
     const capability = resolveCodexCapabilities({
       command: '/definitely/missing/codex',
-      model: 'gpt-6-astra',
+      model: 'gpt-6.2-astra',
       contextProfile: profile,
       reasoningEffort: 'ultra',
       env: {},
@@ -114,10 +114,34 @@ test('Codex 5.6 long context resolves to the current app-server maximum', () => 
   assert.equal(capability.effortSupported, true);
 });
 
+test('offline model windows and reasoning match the released tier, including legacy pins', () => {
+  for (const [model, standard, ultra] of [
+    ['gpt-6.2-astra', 272_000, true],
+    ['gpt-6.2-sol', 500_000, true],
+    ['gpt-6.1-terra', 500_000, true],
+    ['gpt-6-luna', 272_000, false],
+    ['gpt-6-astra', 272_000, true],
+    ['gpt-5.6-sol', 272_000, true],
+    ['gpt-5.6-terra', 272_000, true],
+    ['gpt-5.6-luna', 272_000, false],
+  ]) {
+    for (const [contextProfile, tokens] of [['standard', standard], ['long', 872_000]]) {
+      const cap = resolveCodexCapabilities({
+        command: '/definitely/missing/codex', model, contextProfile, reasoningEffort: 'ultra', env: {},
+      });
+      assert.equal(cap.source, 'known-model', model);
+      assert.equal(cap.resolvedRawContextTokens, tokens, model);
+      assert.equal(cap.usableContextTokens, tokens * 0.95, model);
+      assert.equal(cap.effortSupported, ultra, model);
+      assert.deepEqual(cap.toolOutputTruncationPolicy, { mode: 'tokens', limit: 10_000 }, model);
+    }
+  }
+});
+
 test('Astra raw context requests are capped at the Codex maximum', () => {
   const capability = resolveCodexCapabilities({
     command: '/definitely/missing/codex',
-    model: 'gpt-6-astra',
+    model: 'gpt-6.2-astra',
     requestedContextWindow: 1_050_000,
     reasoningEffort: 'max',
     env: {},
@@ -265,17 +289,21 @@ test('capability discovery refreshes online only for a model missing from the bu
   t.after(() => fs.rm(directory, { recursive: true, force: true }));
   const command = path.join(directory, 'codex');
   const log = path.join(directory, 'args.log');
+  const catalog = path.join(directory, 'catalog.json');
+  await fs.writeFile(catalog, JSON.stringify([{ slug: 'custom-online', context_window: 500_000, max_context_window: 1_000_000 }]));
   await makeExecutable(
     command,
     `#!/usr/bin/env node\n` +
       `const fs = require('node:fs');\n` +
       `const args = process.argv.slice(2);\n` +
       `fs.appendFileSync(${JSON.stringify(log)}, args.join(' ') + '\\n');\n` +
-      `const models = args.includes('--bundled') ? [] : [{slug:'custom-online',context_window:500000,max_context_window:1000000,effective_context_window_percent:95,supported_reasoning_levels:[]}];\n` +
+      `const models = args.includes('--bundled') ? [] : JSON.parse(fs.readFileSync(${JSON.stringify(catalog)}, 'utf8'));\n` +
       `process.stdout.write(JSON.stringify({models}));\n`
   );
 
   clearCodexCapabilityCacheForTests();
+  let now = Date.now();
+  t.mock.method(Date, 'now', () => now);
   const capability = resolveCodexCapabilities({
     command,
     model: 'custom-online',
@@ -293,6 +321,12 @@ test('capability discovery refreshes online only for a model missing from the bu
     await fs.readFile(log, 'utf8'),
     'debug models --bundled\ndebug models\n'
   );
+  await fs.writeFile(catalog, JSON.stringify([{ slug: 'newly-released', context_window: 600_000 }]));
+  const discoverNewRelease = () => resolveCodexCapabilities({ command, model: 'newly-released' });
+  assert.equal(discoverNewRelease().source, 'conservative-fallback');
+  now += 5 * 60_000;
+  assert.equal(discoverNewRelease().resolvedRawContextTokens, 600_000);
+  assert.equal(await fs.readFile(log, 'utf8'), 'debug models --bundled\ndebug models\ndebug models\n');
 });
 
 test('transient catalog failures expire while successful discovery stays cached', async (t) => {
@@ -479,7 +513,7 @@ test('workflow long context gives Claude the truthful Codex usable and compact w
       assert.equal(clientEnv.ANTHROPIC_DEFAULT_SONNET_MODEL_NAME, 'Codex Astra');
       assert.equal(
         clientEnv.ANTHROPIC_DEFAULT_SONNET_MODEL_DESCRIPTION,
-        'codex:gpt-6-astra/max through claude-workflow'
+        'codex:gpt-6.2-astra/max through claude-workflow'
       );
       assert.equal(
         clientEnv.ANTHROPIC_DEFAULT_SONNET_MODEL_SUPPORTED_CAPABILITIES,
@@ -494,14 +528,14 @@ test('workflow long context gives Claude the truthful Codex usable and compact w
         {
           options: [
             {
-              model: 'claude-fable-5-1',
-              label: 'Fable 5.1',
-              description: 'Anthropic claude-fable-5-1',
+              model: 'claude-fable-5-2',
+              label: 'Fable 5.2',
+              description: 'Anthropic claude-fable-5-2',
             },
             {
               model: 'codex-astra',
               label: 'Codex Astra',
-              description: 'codex:gpt-6-astra/max through Claude Workflow',
+              description: 'codex:gpt-6.2-astra/max through Claude Workflow',
             },
           ],
           replaceBuiltInOptions: true,
@@ -735,11 +769,11 @@ test('workflow returns a fully resolved effective subagent route for partial ove
     () => {
       const workflow = buildWorkflowGatewayConfig();
       assert.equal(workflow.subagentRoute.provider, 'codex');
-      assert.equal(workflow.subagentRoute.upstreamModel, 'gpt-6-astra');
+      assert.equal(workflow.subagentRoute.upstreamModel, 'gpt-6.2-astra');
       assert.equal(workflow.subagentRoute.reasoningEffort, 'max');
       assert.equal(
         routeTargetSummary(workflow.subagentRoute),
-        'codex:gpt-6-astra/max'
+        'codex:gpt-6.2-astra/max'
       );
     }
   );

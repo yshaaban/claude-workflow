@@ -12,8 +12,8 @@ described in [SECURITY.md](SECURITY.md), not in an issue.
 
 - Node.js 22 or newer recommended. Node 20 supports the gateway with a native
   Claude Code installation; the Claude Code npm package requires Node 22.
-- Claude Code 2.1.261 or newer.
-- Codex CLI 0.153.4 or newer.
+- Claude Code 2.1.325 or newer.
+- Codex CLI 0.171.0 or newer.
 - macOS, Linux, or WSL 2. Shared mode requires Bash; historical shell cleanup
   supports Bash and zsh.
 - Codex account access to the configured model, with that model present in the
@@ -32,7 +32,7 @@ the Linux filesystem rather than `/mnt/...` paths or Windows executables.
 The configured Codex model must be available to your account. The gateway reads
 bundled metadata first and discovers online metadata only for missing models. This
 profile is shared by workflow agents and the direct Codex main route. If the
-default `gpt-6-astra` route is absent, run
+default `gpt-6.2-astra` route is absent, run
 `claude-workflow config --agents <model-id>` with a full model ID available to
 your Codex workspace. The interactive Codex `/model` picker shows available
 choices.
@@ -72,8 +72,8 @@ use one shared custom-model maximum. Claude's proactive compaction threshold is
 shared across both kinds of ID. Claude Workflow derives the smaller safe value
 across the selected non-Anthropic main route and delegated Codex route. With the
 default Codex Astra `long` profile, Codex advertises 872,000 raw tokens, exposes
-an 828,400-token custom-model maximum, and compacts at 784,800. Fable 5.1 and
-Opus 5 retain their native 1M maximum but also compact at 784,800 when those agents
+an 828,400-token custom-model maximum, and compacts at 784,800. Fable 5.2 and
+Opus 5.5 retain their native 1M maximum but also compact at 784,800 when those agents
 are enabled. Kimi 1M and Qwen use the 828,400 / 784,800 client pair even though
 their providers accept more. The Kimi Moderato route lowers both custom-model
 values to 262,144. If the installed Codex catalog or selected model changes,
@@ -107,32 +107,33 @@ relevant error. Never attach credentials or an unredacted gateway env file.
 
 ## Known boundaries
 
-- Native Ultracode requires Claude's dynamic workflows and xhigh support for
-  the model and organization. Codex route effort is independent. Upgrade
-  v0.3.0 installations to v0.3.1 or newer and start a new session to clear the
-  old `CLAUDE_CODE_EFFORT_LEVEL=max` pin. Kimi/Qwen retain fixed client effort.
-- Codex-routed image blocks are rejected rather than silently discarded.
+- Ultracode requires dynamic workflows and a coordinator that supports
+  `xhigh`. In Claude Code 2.1.284 or later, `/effort ultracode` leaves
+  session effort unchanged. Codex agent effort is independent. Kimi and Qwen
+  retain their provider-specific client effort.
+- Use inline base64 for Codex image inputs and image tool results. The gateway
+  does not fetch remote image URLs. For PDFs, ask Read for a range of pages.
+  Codex cannot accept a complete PDF as a dynamic tool result.
 - A pending dynamic tool call occupies one bounded pool slot until its result,
   its independent timeout, or daemon restart.
 - `ULTRATHINK_GATEWAY_CODEX_PENDING_TOOL_TIMEOUT_MS=0` disables expiry and can
   hold that slot indefinitely; the hard session cap still prevents unbounded
   process growth.
-- All workflow Codex routes disable Codex-native agents and integrations. Codex
-  app-server 0.153.4 still advertises the unavoidable code-mode
-  `functions.exec` and `functions.wait` wrappers alongside Claude's dynamic
-  tools.
+- Codex receives the tools Claude advertises. If an MCP tool is missing,
+  check that Claude has loaded the server and allows the tool in that session.
 - Isolated Codex processes use a private catalog snapshot to suppress
-  experimental native tools, including async questions and clock. All other
-  model metadata stays intact. The source catalog is cached for the gateway's
-  lifetime and reloaded after a gateway restart or executable change; metadata
-  does not refresh mid-session. A missing or invalid catalog fails startup.
-- Fable 5.1 thinking is bound to the preceding request prefix. The Anthropic
+  experimental native tools, native patching, and code-mode wrappers. The
+  installed catalog is cached by executable identity. Online catalog entries
+  refresh after five minutes for new connections. Existing threads retain
+  their startup catalog. A missing or invalid catalog fails startup.
+- Fable 5.2 thinking is bound to the preceding request prefix. The Anthropic
   route forwards it unchanged, including error responses. Start a new session
   when switching model families; forced tool selection is unsupported on Fable.
-- Fable's native Opus fallback stays on Anthropic. Custom route maps and
-  passthrough lists must preserve those targets. Ordinary agents are forced to
-  the configured Codex model, but native forks and skill subagents explicitly
-  inheriting main follow Claude's own model rules.
+- Claude's native fallback targets stay on Anthropic. For Fable 5.2 and Opus
+  5.5, these are Opus 5 and Opus 4.8. Custom route maps and passthrough
+  lists must preserve them. The gateway does not retry refusals. Ordinary
+  agents use the configured Codex model. Native forks and skill subagents
+  that explicitly inherit the main model follow Claude's own model rules.
 - Claude Workflow supplies one exact `/model` picker row for each distinct
   selected route in its private session settings. Claude Code accepts only one
   explicit custom metadata profile. An unrecognized-model

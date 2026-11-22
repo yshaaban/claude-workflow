@@ -16,13 +16,15 @@ const CATALOG = { models: [{
   max_context_window: 872000,
   model_messages: { instructions_template: 'Preserve these exact upstream instructions.' },
   experimental_supported_tools: ['send_user_message_async', 'request_user_input_async', 'clock', 'test_sync_tool', 'future_tool'],
+  apply_patch_tool_type: 'freeform',
+  tool_mode: 'code_mode_only',
   future_metadata: { nested: ['retained'] },
 }, {
   slug: 'gpt-5.6-terra',
   experimental_supported_tools: [],
 }] };
 
-async function fixture(t, { bundled = CATALOG, online = bundled, version = '0.153.4', failStartup = false, holdTurn = false, toolCall = false } = {}) {
+async function fixture(t, { bundled = CATALOG, online = bundled, version = '0.171.0', failStartup = false, holdTurn = false, toolCall = false } = {}) {
   const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'codex-tool-catalog-test-'));
   t.after(() => fs.rm(directory, { recursive: true, force: true, maxRetries: 3 }));
   const command = path.join(directory, 'codex');
@@ -131,7 +133,11 @@ test('isolated catalog suppresses current and future native experimental tools w
   const snapshot = await createCodexToolCatalog({ command: f.command, cwd: f.directory, model: MODEL });
   t.after(snapshot.dispose);
   const expected = structuredClone(CATALOG);
-  expected.models[0].experimental_supported_tools = [];
+  for (const model of expected.models) {
+    model.experimental_supported_tools = [];
+    model.apply_patch_tool_type = null;
+    model.tool_mode = 'direct';
+  }
   assert.deepEqual(JSON.parse(await fs.readFile(snapshot.filePath, 'utf8')), expected);
   assert.equal((await fs.stat(snapshot.filePath)).mode & 0o777, 0o600);
   assert.equal((await fs.stat(path.dirname(snapshot.filePath))).mode & 0o777, 0o700);
@@ -217,10 +223,10 @@ test('app-server startup owns the snapshot, disables inherited context managemen
 });
 
 test('failed app-server startup and obsolete versions clean their snapshots', POSIX_ONLY, async (t) => {
-  for (const options of [{ failStartup: true }, { version: '0.153.3' }]) {
+  for (const options of [{ failStartup: true }, { version: '0.170.0' }]) {
     const f = await fixture(t, options);
     const instance = manager(t, f);
-    await assert.rejects(run(instance), options.failStartup ? /exited unexpectedly/ : /0\.153\.4 or newer/);
+    await assert.rejects(run(instance), options.failStartup ? /exited unexpectedly/ : /0\.171\.0 or newer/);
     await instance.close();
     const start = (await f.calls()).find((entry) => entry.event === 'start');
     assert.ok(start.catalogPath);

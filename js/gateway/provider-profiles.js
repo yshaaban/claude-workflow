@@ -1,3 +1,7 @@
+// Use API IDs, not Claude Code's client-only [1m] qualifier.
+export const FABLE_MAIN_MODEL_ID = 'claude-fable-5-2';
+export const OPUS_MAIN_MODEL_ID = 'claude-opus-5-5';
+
 export const DEEPSEEK_FLASH_DEFAULTS = Object.freeze({
   model: 'deepseek-flash',
   baseUrl: 'https://api.deepseek.com',

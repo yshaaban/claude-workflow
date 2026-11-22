@@ -70,14 +70,8 @@ export function buildClaudeSettingsOverrideEnvironment(extraEnv, childEnv) {
   // Direct non-Anthropic routes suppress Claude's auxiliary terminal-title
   // request. Do not publish a blank value for other routes: their parent
   // environment and persistent Claude settings remain the user's preference.
-  if (
-    Object.hasOwn(extraEnv, CLAUDE_TERMINAL_TITLE_ENV_NAME) &&
-    extraEnv[CLAUDE_TERMINAL_TITLE_ENV_NAME] !== null &&
-    extraEnv[CLAUDE_TERMINAL_TITLE_ENV_NAME] !== undefined
-  ) {
-    settingsEnv[CLAUDE_TERMINAL_TITLE_ENV_NAME] = String(
-      extraEnv[CLAUDE_TERMINAL_TITLE_ENV_NAME]
-    );
+  for (const name of [CLAUDE_TERMINAL_TITLE_ENV_NAME, 'ENABLE_TOOL_SEARCH', 'MCP_CONNECTION_NONBLOCKING']) {
+    if (extraEnv[name] != null) settingsEnv[name] = String(extraEnv[name]);
   }
   settingsEnv.ANTHROPIC_SMALL_FAST_MODEL = String(
     extraEnv.CLAUDE_CODE_SUBAGENT_MODEL || ''

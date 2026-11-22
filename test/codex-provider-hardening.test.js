@@ -7,6 +7,7 @@ import { performance } from 'node:perf_hooks';
 import { fileURLToPath } from 'node:url';
 
 import { CodexSessionManager } from '../js/gateway/codex-provider.js';
+import { estimateCodexRequestTokens } from '../js/gateway/codex-content.js';
 
 const MODEL = 'claude-sonnet-4-7';
 const activeSessions = new Set();
@@ -167,7 +168,7 @@ function processExists(pid) {
 function finalAppServer(
   logPath,
   userAgent =
-    'claude_workflow_gateway/0.153.4 (Mac OS 26.4.0; arm64) ' +
+    'claude_workflow_gateway/0.171.0 (Mac OS 26.4.0; arm64) ' +
     'iTerm.app/3.6.10 (claude_workflow_gateway; 0.1.0)'
 ) {
   return `#!/usr/bin/env node
@@ -267,6 +268,7 @@ rl.on('line', function onLine(line) {
   }
   if (message.method === 'turn/start') {
     turnId = 'turn-' + process.pid;
+    log({ event: 'turn_input', input: message.params.input });
     sendBatch([
       { id: message.id, result: { turn: { id: turnId } } },
       { id: 900, method: 'item/tool/call', params: {
@@ -283,7 +285,7 @@ rl.on('line', function onLine(line) {
     return;
   }
   if (message.id === 900 && message.result) {
-    log({ event: 'tool_result', pid: process.pid, text: message.result.contentItems?.[0]?.text });
+    log({ event: 'tool_result', pid: process.pid, text: message.result.contentItems?.[0]?.text, success: message.result.success });
     setImmediate(function complete() {
       send({ method: 'item/agentMessage/delta', params: { turnId, itemId: 'message', delta: 'CONTINUED' } });
       send({ method: 'turn/completed', params: { turn: { id: turnId, status: 'completed' } } });
@@ -436,7 +438,7 @@ setInterval(function keepAlive() {}, 1000);
 `;
 }
 
-function immediateToolAppServer(logPath) {
+function immediateToolAppServer(logPath, terminal = null) {
   return `#!/usr/bin/env node
 const fs = require('node:fs');
 const readline = require('node:readline');
@@ -490,15 +492,33 @@ rl.on('line', function onLine(line) {
         tool: 'ext_tool_001',
         arguments: { command: 'printf parallel' }
       } });
+      log({ event: 'parallel_sent' });
+      const terminal = ${JSON.stringify(terminal)};
+      if (terminal) {
+        if (terminal === 'error') {
+          send({ method: 'error', params: { turnId, willRetry: false, error: {
+            message: 'context window exceeded', codexErrorInfo: 'contextWindowExceeded'
+          } } });
+        } else {
+          send({ method: 'turn/completed', params: { turn: { id: turnId, status: terminal } } });
+        }
+        send({ id: 903, method: 'item/tool/call', params: {
+          turnId, callId: 'after_end', tool: 'ext_tool_001', arguments: {}
+        } });
+      } else {
+        // A retryable warning in the same position does not end the turn.
+        send({ method: 'error', params: { turnId, willRetry: true, error: { message: 'reconnecting' } } });
+      }
     }, 25);
     return;
   }
-  if (message.id === 902 && message.error) {
-    log({ event: 'parallel_rejected', message: message.error.message });
+  if (message.error) {
+    log({ event: 'rpc_rejected', id: message.id });
     return;
   }
-  if (message.id === 901 && message.result) {
+  if ((message.id === 901 || message.id === 902) && message.result) {
     log({ event: 'tool_result', text: message.result.contentItems?.[0]?.text });
+    if (message.id === 901) return;
     setImmediate(function complete() {
       sendBatch([
         { method: 'rawResponse/completed', params: {
@@ -759,14 +779,21 @@ async function testToolBoundaryCompletesWithoutFixedDelay() {
       true,
       'canonical app-server threads must not request removed experimental raw events'
     );
-    await waitFor(async function parallelCallRejected() {
+    await waitFor(async function parallelCallSent() {
       const entries = await readJsonLines(logPath);
-      return entries.some((entry) => entry.event === 'parallel_rejected');
-    }, 'separate parallel tool call rejection');
+      return entries.some((entry) => entry.event === 'parallel_sent');
+    }, 'late parallel tool call after the first Claude boundary');
 
-    const continued = await manager.processRequest(
+    const second = await manager.processRequest(
       request('immediate-tool'),
       toolResultBody('call_immediate', 'IMMEDIATE_RESULT', tools),
+      route()
+    );
+    assert.equal(second.type, 'tool_use');
+    assert.equal(second.toolCall.id, 'call_parallel');
+    const continued = await manager.processRequest(
+      request('immediate-tool'),
+      toolResultBody('call_parallel', 'PARALLEL_RESULT', tools),
       route()
     );
     assert.equal(continued.type, 'final');
@@ -777,11 +804,8 @@ async function testToolBoundaryCompletesWithoutFixedDelay() {
       total_tokens: 20,
     });
     const entries = await readJsonLines(logPath);
-    const rejection = entries.find((entry) => entry.event === 'parallel_rejected');
-    assert.match(rejection.message, /call_parallel/u);
-    assert.match(rejection.message, /call_immediate/u);
     const results = entries.filter((entry) => entry.event === 'tool_result');
-    assert.deepEqual(results.map((entry) => entry.text), ['IMMEDIATE_RESULT']);
+    assert.deepEqual(results.map((entry) => entry.text), ['IMMEDIATE_RESULT', 'PARALLEL_RESULT']);
   } finally {
     await manager.close();
     await fs.rm(tempDir, { recursive: true, force: true });
@@ -1137,7 +1161,7 @@ async function testDynamicToolsOnlyVersionGate() {
   try {
     await assert.rejects(
       manager.processRequest(request('old-dynamic-only'), body('Reject old Codex.'), route()),
-      /requires Codex CLI 0\.153\.4 or newer/u
+      /requires Codex CLI 0\.171\.0 or newer/u
     );
   } finally {
     await manager.close();
@@ -1221,6 +1245,174 @@ async function testPendingToolRetentionAndHardCapacity() {
   } finally {
     await manager.close();
     await fs.rm(tempDir, { recursive: true, force: true });
+  }
+}
+
+async function testCappedImageResultRecovery() {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'codex-capped-image-'));
+  const command = path.join(dir, 'fake-codex');
+  const log = path.join(dir, 'events.jsonl');
+  const manager = trackManager(new CodexSessionManager(managerConfig(command, dir, {
+    toolResultMaxBytes: 2048, toolResultWindowMaxBytes: 160,
+  })));
+  try {
+    await makeExecutable(command, toolAppServer(log));
+    const tools = [{ name: 'Bash', input_schema: { type: 'object' } }];
+    const transcript = body('Run the tool.', tools);
+    const run = () => manager.processRequest(request('images'), structuredClone(transcript), route());
+    for (const content of ['x'.repeat(96), [
+      { type: 'text', text: 'PRIVATE_IMAGE_RESULT' },
+      { type: 'image', source: { type: 'base64', media_type: 'image/png', data: 'YWFh'.repeat(20) } },
+    ]]) {
+      const call = await run();
+      transcript.messages.push(
+        { role: 'assistant', content: [{ type: 'tool_use', ...call.toolCall }] },
+        { role: 'user', content: [{ type: 'tool_result', tool_use_id: call.toolCall.id, content }] }
+      );
+      const result = await run();
+      assert.equal(result.text, 'CONTINUED');
+      transcript.messages.push({ role: 'assistant', content: result.text }, { role: 'user', content: 'Continue.' });
+    }
+    const outputs = (await readJsonLines(log)).filter(e => e.event === 'tool_result');
+    assert.deepEqual(outputs.map(e => e.success), [true, false]);
+    assert.match(outputs[1].text, /^Image omitted:/u);
+    assert.ok(Buffer.byteLength(outputs[1].text) <= 64);
+    await manager.processRequest(request('images-replay'), transcript, route());
+    const replay = (await readJsonLines(log)).filter(e => e.event === 'turn_input').at(-1).input;
+    assert.deepEqual(replay.map(part => part.type), ['text']);
+    assert.ok(replay[0].text.includes('[tool_result call_pending error]\n' + outputs[1].text));
+    assert.doesNotMatch(replay[0].text, /PRIVATE_IMAGE_RESULT|YWFh/u);
+  } finally {
+    await manager.close();
+    await fs.rm(dir, { recursive: true, force: true });
+  }
+}
+
+async function testUnsupportedToolResults() {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'codex-unsupported-tool-results-'));
+  const command = path.join(dir, 'fake-codex');
+  const log = path.join(dir, 'events.jsonl');
+  const manager = trackManager(new CodexSessionManager(managerConfig(command, dir)));
+  try {
+    await makeExecutable(command, toolAppServer(log));
+    const tools = [{ name: 'Read', input_schema: { type: 'object' } }];
+    const cases = [
+      { type: 'image', source: { type: 'url', url: 'https://example.invalid/PRIVATE_TOOL_DATA' } },
+      { type: 'image', source: { type: 'base64', media_type: 'image/png', data: '**PRIVATE_TOOL_DATA**' } },
+      { type: 'resource', resource: { uri: 'file:///PRIVATE_TOOL_DATA', text: 'do not expose' } },
+      { type: 'tool_reference', tool_name: null },
+    ];
+    const history = [];
+    for (const [index, unsupported] of cases.entries()) {
+      const req = request('unsupported-' + index);
+      const transcript = body('Call the tool.', tools);
+      const call = await manager.processRequest(req, transcript, route());
+      const continuation = { ...transcript, messages: [...transcript.messages,
+        { role: 'assistant', content: [{ type: 'tool_use', ...call.toolCall }] },
+        { role: 'user', content: [{ type: 'tool_result', tool_use_id: call.toolCall.id,
+          content: [{ type: 'text', text: 'PRIVATE_TOOL_DATA' }, unsupported] }] },
+      ] };
+      assert.equal((await manager.processRequest(req, continuation, route())).text, 'CONTINUED');
+      const result = (await readJsonLines(log)).filter(e => e.event === 'tool_result').at(-1);
+      assert.equal(result.success, false);
+      assert.match(result.text, /No content was forwarded/u);
+      assert.doesNotMatch(result.text, /PRIVATE_TOOL_DATA/u);
+      history.push(...continuation.messages);
+    }
+    await manager.processRequest(request('unsupported-replay'), {
+      ...body('Continue.', tools), messages: [...history, { role: 'user', content: 'Continue.' }],
+    }, route());
+    const replay = (await readJsonLines(log)).filter(e => e.event === 'turn_input').at(-1).input;
+    assert.deepEqual(replay.map(part => part.type), ['text']);
+    assert.equal(replay[0].text.match(/No content was forwarded/gu)?.length, cases.length);
+    assert.doesNotMatch(replay[0].text, /PRIVATE_TOOL_DATA/u);
+  } finally {
+    await manager.close();
+    await fs.rm(dir, { recursive: true, force: true });
+  }
+}
+
+async function testPdfToolResultRecovery() {
+  const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'codex-pdf-recovery-'));
+  const command = path.join(tempDir, 'fake-codex');
+  const logPath = path.join(tempDir, 'app-server.jsonl');
+  const manager = trackManager(new CodexSessionManager(managerConfig(command, tempDir)));
+  try {
+    await makeExecutable(command, toolAppServer(logPath));
+    const tools = [{ name: 'Read', input_schema: { type: 'object' } }];
+    // This is the wire shape Claude Read uses for a whole PDF (not a pages read).
+    const pdf = { type: 'document', source: {
+      type: 'base64', media_type: 'application/pdf', data: 'JVBERi0xLjQK'.repeat(10_000),
+    } };
+    const attachment = { model: MODEL, messages: [{ role: 'user', content: [pdf] }], tools };
+    await assert.rejects(manager.processRequest(request('pdf-attachment'), attachment, route()),
+      error => error.status === 400 && /direct document attachments/u.test(error.message));
+    assert.throws(() => estimateCodexRequestTokens(attachment), /direct document attachments/u);
+    assert.deepEqual(await readJsonLines(logPath), [], 'no app-server process for invalid attachments');
+
+    const firstBody = body('Read the PDF.', tools);
+    const first = await manager.processRequest(request('pdf-live'), firstBody, route());
+    assert.equal(first.toolCall.name, 'Read');
+    const continuation = { ...firstBody, messages: [...firstBody.messages,
+      { role: 'assistant', content: [{ type: 'tool_use', ...first.toolCall }] },
+      { role: 'user', content: [{ type: 'tool_result', tool_use_id: first.toolCall.id,
+        content: [{ type: 'text', text: 'PDF file read: example.pdf' }, pdf] }] },
+    ] };
+    assert.ok(estimateCodexRequestTokens(continuation) < 1000, 'unused PDF transport bytes are not model input');
+    const last = await manager.processRequest(request('pdf-live'), continuation, route());
+    assert.equal(last.text, 'CONTINUED');
+    const forwarded = (await readJsonLines(logPath)).find(event => event.event === 'tool_result');
+    assert.equal(forwarded.success, false);
+    assert.match(forwarded.text, /No PDF content was forwarded.+Read.+pages range/u);
+    assert.doesNotMatch(forwarded.text, /JVBERi|PDF file read/u);
+
+    // A new session rebuilding full Claude history must see the same result.
+    const replay = { ...continuation, messages: [...continuation.messages,
+      { role: 'assistant', content: 'I need the pages.' }, { role: 'user', content: 'Continue.' }] };
+    await manager.processRequest(request('pdf-replay'), replay, route());
+    const { input } = (await readJsonLines(logPath)).filter(event => event.event === 'turn_input').at(-1);
+    assert.ok(input[0].text.includes('[tool_result call_pending error]\n' + forwarded.text));
+    assert.doesNotMatch(input[0].text, /JVBERi|PDF file read/u);
+  } finally {
+    await manager.close();
+    await fs.rm(tempDir, { recursive: true, force: true });
+  }
+}
+
+async function testTerminatedTurnDoesNotReplayTools() {
+  const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'codex-terminal-tool-'));
+  try {
+    const tools = [{ name: 'Bash', input_schema: { type: 'object' } }];
+    for (const terminal of ['failed', 'interrupted', 'error']) {
+      const command = path.join(directory, 'fake-' + terminal);
+      const log = path.join(directory, terminal + '.jsonl');
+      await makeExecutable(command, immediateToolAppServer(log, terminal));
+      const manager = trackManager(new CodexSessionManager(managerConfig(command, directory, { maxSessions: 1 })));
+      try {
+        const req = request('ended-' + terminal);
+        const initial = body('Run the tool immediately.', tools);
+        const exposed = await manager.processRequest(req, initial, route());
+        assert.equal(exposed.toolCall.id, 'call_immediate');
+        await waitFor(async () => (await readJsonLines(log)).some(e => e.event === 'rpc_rejected' && e.id === 903),
+          'confirmation of the terminal notification and rejected late call');
+        // Neither a continuation nor retrying the previously delivered response
+        // may send a stale result, expose call_parallel, or repeat the first tool.
+        for (const retry of [toolResultBody(exposed.toolCall.id, 'already ran', tools), initial]) {
+          await assert.rejects(manager.processRequest(req, retry, route()),
+            error => error.status === 400 && /tool may already have run/u.test(error.message));
+        }
+        const events = await readJsonLines(log);
+        assert.deepEqual(events.filter(e => e.event === 'rpc_rejected').map(e => e.id), [901, 902, 903]);
+        assert.equal(events.filter(e => e.event === 'thread_start').length, 1);
+        assert.equal(events.some(e => e.event === 'tool_result'), false);
+        const newWork = await manager.processRequest(req, body('Start a different task.', tools), route());
+        assert.equal(newWork.type, 'tool_use', 'terminal calls must not block independent work at capacity');
+      } finally {
+        await manager.close();
+      }
+    }
+  } finally {
+    await fs.rm(directory, { recursive: true, force: true });
   }
 }
 
@@ -1349,6 +1541,14 @@ try {
     await testDynamicToolsOnlyThreadMode();
     beginStage('dynamic-tools version gate');
     await testDynamicToolsOnlyVersionGate();
+    beginStage('PDF tool recovery and transcript replay');
+    await testPdfToolResultRecovery();
+    beginStage('capped tool image recovery');
+    await testCappedImageResultRecovery();
+    beginStage('unsupported tool results');
+    await testUnsupportedToolResults();
+    beginStage('terminal notifications while Claude owns a tool');
+    await testTerminatedTurnDoesNotReplayTools();
     beginStage('pending-tool retention and capacity');
     await testPendingToolRetentionAndHardCapacity();
     beginStage('pending-tool timeout');

@@ -62,11 +62,9 @@ complete private prompts or transcripts.
   delegated-agent routes, starts without Codex-native execution environments
   or capability roots. Native agents, memories, MCP servers, plugins, skills,
   web, planning, permission, request-input, and clock/sleep tools are disabled.
-  Repository operations use the dynamic tools supplied by Claude Code. Codex
-  app-server 0.153.4 still advertises its code-mode `functions.exec` and
-  `functions.wait` wrappers; the app-server has no supported thread override
-  that removes them. This isolation does not turn permission bypass into a
-  sandbox.
+  A private per-process model catalog selects direct tool mode and disables
+  native patching. Repository operations use the tools supplied and executed
+  by Claude Code. This isolation does not turn permission bypass into a sandbox.
 - Workflow entrypoints ignore project `.env` by default. Only a parent process
   can opt a trusted project into per-session loading. Shared mode rejects that
   opt-in because its daemon is global rather than repository-scoped.

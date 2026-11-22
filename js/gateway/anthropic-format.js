@@ -507,6 +507,22 @@ export function translateAnthropicMessagesRequest(requestBody, route) {
 }
 
 export function translateAnthropicMessagesRequestWithOptions(requestBody, route, options = {}) {
+  const gpt62Chat = route.provider === 'openai' &&
+    /^gpt-6\.2-(?:astra|sol)(?:-\d{4}-\d{2}-\d{2})?$/u.test(route.upstreamModel);
+  if (gpt62Chat) {
+    // Both 6.2 models accept text through Chat Completions. Their tool
+    // protocol is Responses, which the Codex app-server route implements.
+    if (requestBody.tools?.length || (requestBody.tool_choice && requestBody.tool_choice.type !== 'none') ||
+        (Array.isArray(requestBody.messages) && requestBody.messages.some(message => Array.isArray(message?.content) &&
+          message.content.some(block => block?.type === 'tool_use' || block?.type === 'tool_result')))) {
+      throw new GatewayError(400, 'invalid_request_error',
+        'GPT-6.2 tool calls require Responses. Configure this model with provider "codex" for Claude tools.');
+    }
+    if (route.reasoningEffort && !['low', 'medium', 'high', 'xhigh', 'max'].includes(route.reasoningEffort)) {
+      throw new GatewayError(400, 'invalid_request_error',
+        'GPT-6.2 Chat Completions effort must be low, medium, high, xhigh, or max.');
+    }
+  }
   const messages = [];
   const systemPrompt = translateSystemPrompt(requestBody.system);
   const systemRole = route.systemRole || 'developer';
@@ -539,10 +555,10 @@ export function translateAnthropicMessagesRequestWithOptions(requestBody, route,
         ? Math.min(requestBody.max_tokens, routeMaximum)
         : requestBody.max_tokens;
   }
-  if (typeof requestBody.temperature === 'number') {
+  if (!gpt62Chat && typeof requestBody.temperature === 'number') {
     translated.temperature = requestBody.temperature;
   }
-  if (typeof requestBody.top_p === 'number') {
+  if (!gpt62Chat && typeof requestBody.top_p === 'number') {
     translated.top_p = requestBody.top_p;
   }
   if (Array.isArray(requestBody.stop_sequences) && requestBody.stop_sequences.length > 0) {
@@ -554,7 +570,7 @@ export function translateAnthropicMessagesRequestWithOptions(requestBody, route,
     translated.tools = tools;
   }
 
-  if (shouldTranslateToolChoice(route)) {
+  if (!gpt62Chat && shouldTranslateToolChoice(route)) {
     validateRouteToolChoice(route, requestBody.tool_choice);
     const toolChoice = translateToolChoice(requestBody.tool_choice);
     if (toolChoice !== undefined) {

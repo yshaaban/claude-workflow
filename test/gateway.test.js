@@ -94,7 +94,7 @@ async function makeExecutable(filePath, content) {
   await fs.chmod(filePath, 0o755);
 }
 
-async function makeClaudeExecutable(filePath, content, version = '2.1.261') {
+async function makeClaudeExecutable(filePath, content, version = '2.1.330') {
   const firstNewline = content.indexOf('\n');
   assert.notEqual(firstNewline, -1, 'fake Claude executable must start with a shebang');
   const versionProbe = content.startsWith('#!/usr/bin/env node')
@@ -1106,7 +1106,7 @@ await runTest('gateway can make a configured frontier model the only Anthropic p
       assert.equal(frontierRoute.provider, 'anthropic');
       assert.equal(frontierRoute.upstreamModel, 'claude-fable-5');
       assert.equal(olderOpusRoute.provider, 'codex');
-      assert.equal(olderOpusRoute.upstreamModel, 'gpt-6-astra');
+      assert.equal(olderOpusRoute.upstreamModel, 'gpt-6.2-astra');
       ok('only the configured frontier model stays on Anthropic while older Claude ids route to Codex');
     }
   );
@@ -1165,14 +1165,14 @@ await runTest(
   }
 );
 
-await runTest('workflow defaults use the canonical Fable 5.1 model id', async function testWorkflowMainAliasStripping() {
+await runTest('workflow defaults use the canonical Fable 5.2 model id', async function testWorkflowMainAliasStripping() {
   await withTemporaryEnv(CLEAN_WORKFLOW_ENV, async function assertWorkflowMainAlias() {
     const { config, mainModelId } = buildWorkflowGatewayConfig();
     const route = resolveModelRoute(mainModelId, config);
-    assert.equal(mainModelId, 'claude-fable-5-1');
+    assert.equal(mainModelId, 'claude-fable-5-2');
     assert.equal(route.provider, 'anthropic');
-    assert.equal(route.upstreamModel, 'claude-fable-5-1');
-    ok('workflow defaults preserve the native 1M Fable 5.1 API model id');
+    assert.equal(route.upstreamModel, 'claude-fable-5-2');
+    ok('workflow defaults preserve the native 1M Fable 5.2 API model id');
   });
 });
 
@@ -2994,7 +2994,7 @@ await runTest(
 );
 
 await runTest(
-  'Codex app-server parallel tool calls reject later calls without clobbering the pending call',
+  'Codex app-server parallel tool calls round-trip on the same turn in order',
   async function testCodexParallelToolCallsDoNotClobberPendingCall() {
     const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'ultrathink-codex-parallel-tool-'));
     const codexPath = path.join(tempDir, 'codex-parallel-tool');
@@ -3030,13 +3030,14 @@ await runTest(
           '    setTimeout(function emitToolCalls() {\n' +
           "      send({ id: 'tool_req_1', method: 'item/tool/call', params: { turnId, callId: 'call_first', tool: 'ext_tool_001', arguments: { value: 'first' } } });\n" +
           "      send({ id: 'tool_req_2', method: 'item/tool/call', params: { turnId, callId: 'call_second', tool: 'ext_tool_001', arguments: { value: 'second' } } });\n" +
-          '      send({ method: "thread/tokenUsage/updated", params: { turnId, tokenUsage: { total: { inputTokens: 12, outputTokens: 5 } } } });\n' +
+          "      send({ id: 'unregistered', method: 'item/tool/call', params: { turnId, callId: 'call_unknown', tool: 'NotFromClaude', arguments: {} } });\n" +
+          "      send({ id: 'duplicate', method: 'item/tool/call', params: { turnId, callId: 'call_second', tool: 'ext_tool_001', arguments: {} } });\n" +
           '    }, 5);\n' +
           '    return;\n' +
           '  }\n' +
-          "  if (message.id === 'tool_req_1' || message.id === 'tool_req_2') {\n" +
+          "  if (['tool_req_1', 'tool_req_2', 'unregistered', 'duplicate'].includes(message.id)) {\n" +
           '    record(message);\n' +
-          "    if (message.id === 'tool_req_1' && message.result) {\n" +
+          "    if (message.id === 'tool_req_2' && message.result) {\n" +
           '      setTimeout(function completeTurn() {\n' +
           "        send({ method: 'turn/completed', params: { turn: { id: turnId, status: 'completed' } } });\n" +
           '      }, 5);\n' +
@@ -3075,29 +3076,14 @@ await runTest(
         };
 
         const toolUse = await manager.processRequest(gatewayRequest(), initialRequest, codexRoute());
-        await waitForFile(responsesPath);
-
-        const firstResponses = JSON.parse(await fs.readFile(responsesPath, 'utf8'));
-        const rejectedSecondCall = firstResponses.find(function findSecondResponse(message) {
-          return message.id === 'tool_req_2';
-        });
         assert.equal(toolUse.type, 'tool_use');
         assert.deepEqual(toolUse.toolCall, {
           id: 'call_first',
           name: 'lookup',
           input: { value: 'first' },
         });
-        assert.equal(Boolean(rejectedSecondCall?.error), true);
-        assert.match(rejectedSecondCall.error.message, /parallel Codex tool call call_second/u);
-        assert.match(rejectedSecondCall.error.message, /call_first/u);
-        assert.equal(
-          firstResponses.some(function findFirstResponse(message) {
-            return message.id === 'tool_req_1';
-          }),
-          false
-        );
-
-        const finalOutcome = await manager.processRequest(
+        await waitForFile(responsesPath); // the third call has arrived and was rejected
+        const second = await manager.processRequest(
           gatewayRequest(),
           {
             model: CODEX_REQUEST_MODEL,
@@ -3129,6 +3115,20 @@ await runTest(
           },
           codexRoute()
         );
+        assert.deepEqual(second.toolCall, {
+          id: 'call_second', name: 'lookup', input: { value: 'second' },
+        });
+        assert.deepEqual(second.usage, { input_tokens: 0, output_tokens: 0 });
+        const finalOutcome = await manager.processRequest(gatewayRequest(), {
+          ...initialRequest,
+          messages: [{ role: 'user', content: [{
+            type: 'tool_result', tool_use_id: 'call_second', content: [
+              { type: 'text', text: 'before' },
+              { type: 'image', source: { type: 'base64', media_type: 'image/png', data: 'aW1hZ2U=' } },
+              { type: 'tool_reference', tool_name: 'mcp__test__search' },
+            ],
+          }] }],
+        }, codexRoute());
         const finalResponses = JSON.parse(await fs.readFile(responsesPath, 'utf8'));
         const continuedFirstCall = finalResponses.find(function findFirstResponse(message) {
           return message.id === 'tool_req_1';
@@ -3142,7 +3142,16 @@ await runTest(
             text: 'first complete',
           },
         ]);
-        ok('parallel Codex tool calls reject later calls while preserving the first pending tool_result path');
+        assert.deepEqual(finalResponses.map((response) => response.id), ['unregistered', 'duplicate', 'tool_req_1', 'tool_req_2']);
+        assert.deepEqual(finalResponses.slice(0, 2).map((response) => response.error.code), [-32602, -32602]);
+        assert.deepEqual(finalResponses.at(-1).result, {
+          success: true, contentItems: [
+            { type: 'inputText', text: 'before' },
+            { type: 'inputImage', imageUrl: 'data:image/png;base64,aW1hZ2U=' },
+            { type: 'inputText', text: '[Claude tool reference: "mcp__test__search"]' },
+          ],
+        });
+        ok('parallel calls receive both original results, including ordered image and tool reference blocks');
       } finally {
         await manager?.close();
         if (previousPath === undefined) {
@@ -4518,7 +4527,7 @@ await runTest('Codex routing rejects invalid named Anthropic tool_choice explici
   ok('invalid Codex tool_choice selections fail before any app-server work starts');
 });
 
-await runTest('Codex routing rejects image blocks instead of dropping them from the transcript', async function testCodexRejectsImageBlocks() {
+await runTest('Codex rejects remote images before opening a thread', async function testCodexRejectsRemoteImages() {
   let createdSessions = 0;
   const manager = new CodexSessionManager(
     {
@@ -4547,9 +4556,8 @@ await runTest('Codex routing rejects image blocks instead of dropping them from 
               {
                 type: 'image',
                 source: {
-                  type: 'base64',
-                  media_type: 'image/png',
-                  data: 'aW1hZ2U=',
+                  type: 'url',
+                  url: 'https://example.invalid/image.png',
                 },
               },
             ],
@@ -4559,10 +4567,10 @@ await runTest('Codex routing rejects image blocks instead of dropping them from 
       },
       codexRoute()
     ),
-    /Codex-routed gateway requests do not support image content blocks yet/u
+    /Codex images require inline base64 data/u
   );
   assert.equal(createdSessions, 0);
-  ok('Codex-routed image requests fail explicitly before vision content can be discarded');
+  ok('remote Codex images fail explicitly without fetching them');
 });
 
 await runTest('Codex session keys include effective tool_choice narrowing', async function testCodexToolChoiceSessionKeys() {
@@ -4698,7 +4706,12 @@ await runTest('fresh Codex sessions seed the app-server turn with the supplied t
         {
           model: CODEX_REQUEST_MODEL,
           messages: [
-            { role: 'user', content: 'First requirement.' },
+            { role: 'user', content: [
+              { type: 'text', text: 'First requirement. Keep literal \ue000.' },
+              { type: 'tool_result', tool_use_id: 'earlier-image', content: [
+                { type: 'image', source: { type: 'base64', media_type: 'image/png', data: 'YQ==' } },
+              ] },
+            ] },
             { role: 'assistant', content: [{ type: 'text', text: 'Prior answer.' }] },
             { role: 'user', content: 'Latest question.' },
           ],
@@ -4708,7 +4721,10 @@ await runTest('fresh Codex sessions seed the app-server turn with the supplied t
       );
 
       const turnParams = JSON.parse(await fs.readFile(turnParamsPath, 'utf8'));
-      const inputText = turnParams.input[0].text;
+      assert.deepEqual(turnParams.input.map((item) => item.type), ['text', 'image', 'text']);
+      assert.match(turnParams.input[0].text, /Keep literal \ue000\./u);
+      assert.equal(turnParams.input[1].url, 'data:image/png;base64,YQ==');
+      const inputText = turnParams.input.filter((item) => item.type === 'text').map((item) => item.text).join('');
       assert.equal(inputText.includes('First requirement.'), true);
       assert.equal(inputText.includes('Prior answer.'), true);
       assert.equal(inputText.includes('Latest question.'), true);
@@ -5814,14 +5830,7 @@ await runTest(
                   type: 'tool_result',
                   tool_use_id: 'call_read_bad_result',
                   content: [
-                    {
-                      type: 'image',
-                      source: {
-                        type: 'base64',
-                        media_type: 'image/png',
-                        data: 'x',
-                      },
-                    },
+                    { type: 'unsupported_future_format' },
                   ],
                 },
               ],
@@ -5838,11 +5847,9 @@ await runTest(
       return entry.event === 'codex.session.context_recovery_unmatched';
     });
     assert.equal(Boolean(driftTrace), true);
-    assert.match(
-      driftTrace.details.read_context.read_tool_result_parse_error,
-      /unsupported tool_result content block type/u
-    );
-    ok('Read diagnostic tracing records malformed results without replacing the provider failure');
+    assert.equal(driftTrace.details.read_context.read_tool_result_parse_error, null);
+    assert.equal(driftTrace.details.read_context.read_tool_result_is_error, true);
+    ok('Read diagnostics recognize unsupported content as a tool error without masking the provider failure');
   }
 );
 
@@ -7393,7 +7400,7 @@ await runTest(
         ULTRATHINK_GATEWAY_CODEX_COMMAND: loggedInCodexPath,
       });
       assert.equal(outdatedClaude.code, 1);
-      assert.match(outdatedClaude.stderr, /requires Claude Code 2\.1\.261 or newer/u);
+      assert.match(outdatedClaude.stderr, /requires Claude Code 2\.1\.325 or newer/u);
 
       await makeClaudeShouldNotRunCommand(claudePath);
 
@@ -7729,17 +7736,17 @@ await runTest(
       // regular workflow agents stay on the configured Codex Astra route.
       assert.deepEqual(
         defaultHealth.health.anthropic_passthrough_models,
-        ['claude-fable-5-1*', 'claude-opus-5', 'claude-opus-5[1m]', 'claude-opus-4-8', 'claude-opus-4-8[1m]']
+        ['claude-fable-5-2*', 'claude-opus-5', 'claude-opus-5[1m]', 'claude-opus-4-8', 'claude-opus-4-8[1m]']
       );
       assert.equal(
-        defaultHealth.health.exposed_models.includes('claude-fable-5-1'),
+        defaultHealth.health.exposed_models.includes('claude-fable-5-2'),
         true
       );
-      assert.equal(defaultHealth.health.codex_target_model, 'gpt-6-astra');
+      assert.equal(defaultHealth.health.codex_target_model, 'gpt-6.2-astra');
       assert.equal(defaultHealth.health.codex_reasoning_effort, 'max');
       assert.match(
         modelDisplayName(defaultHealth, 'claude-sonnet-4-7') || '',
-        /Codex gpt-6-astra/u
+        /Codex gpt-6\.2-astra/u
       );
       assert.equal(optedInHealth.health.display_routed_model, true);
       assert.equal(optedInHealth.subagentModel, 'codex-astra');

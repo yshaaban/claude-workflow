@@ -13,6 +13,7 @@ import {
   translateOpenAiResponseToAnthropic,
 } from './anthropic-format.js';
 import { isGatewayLoopbackHost, loadGatewayConfig } from './config.js';
+import { estimateCodexRequestTokens } from './codex-content.js';
 import { CodexSessionManager } from './codex-provider.js';
 import { GatewayError, listGatewayModels, resolveModelRoute } from './model-routing.js';
 import { gatewayProviderProfile, providerRequiresGatewayAuth } from './provider-profiles.js';
@@ -1844,7 +1845,9 @@ async function handleCountTokens(req, res, config, signal) {
     }
     case 'estimate':
       res.json({
-        input_tokens: estimateAnthropicInputTokens(req.body),
+        input_tokens: route.provider === 'codex'
+          ? estimateCodexRequestTokens(req.body)
+          : estimateAnthropicInputTokens(req.body),
       });
       return;
     case 'conservative-estimate':

@@ -14,6 +14,9 @@ const GATEWAY_PROMPT_HEADROOM_TOKENS = 32_000;
 const CATALOG_TIMEOUT_MS = 5_000;
 const CATALOG_MAX_BUFFER_BYTES = 16 * 1024 * 1024;
 const CATALOG_NEGATIVE_CACHE_TTL_MS = 30_000;
+// Match Codex models-manager's online catalog lifetime. The bundled catalog
+// is part of the executable and can stay cached until that identity changes.
+const CATALOG_ONLINE_CACHE_TTL_MS = 5 * 60_000;
 const DEFAULT_TOOL_OUTPUT_TRUNCATION_POLICY = Object.freeze({
   mode: 'bytes',
   limit: 10_000,
@@ -23,43 +26,42 @@ const KNOWN_TOOL_OUTPUT_TRUNCATION_POLICY = Object.freeze({
   limit: 10_000,
 });
 
-const KNOWN_MODEL_CAPABILITIES = Object.freeze({
-  'gpt-6-astra': Object.freeze({
-    contextWindow: 272_000,
-    maxContextWindow: 872_000,
-    effectiveContextWindowPercent: 95,
-    reasoningEfforts: Object.freeze(['low', 'medium', 'high', 'xhigh', 'max', 'ultra']),
-    toolOutputTruncationPolicy: KNOWN_TOOL_OUTPUT_TRUNCATION_POLICY,
-  }),
-  'gpt-5.4': Object.freeze({
-    contextWindow: 272_000,
-    maxContextWindow: 1_000_000,
-    effectiveContextWindowPercent: 95,
-    reasoningEfforts: Object.freeze(['low', 'medium', 'high', 'xhigh']),
-    toolOutputTruncationPolicy: KNOWN_TOOL_OUTPUT_TRUNCATION_POLICY,
-  }),
-  'gpt-5.6-sol': Object.freeze({
-    contextWindow: 272_000,
-    maxContextWindow: 872_000,
-    effectiveContextWindowPercent: 95,
-    reasoningEfforts: Object.freeze(['low', 'medium', 'high', 'xhigh', 'max', 'ultra']),
-    toolOutputTruncationPolicy: KNOWN_TOOL_OUTPUT_TRUNCATION_POLICY,
-  }),
-  'gpt-5.6-terra': Object.freeze({
-    contextWindow: 272_000,
-    maxContextWindow: 872_000,
-    effectiveContextWindowPercent: 95,
-    reasoningEfforts: Object.freeze(['low', 'medium', 'high', 'xhigh', 'max', 'ultra']),
-    toolOutputTruncationPolicy: KNOWN_TOOL_OUTPUT_TRUNCATION_POLICY,
-  }),
-  'gpt-5.6-luna': Object.freeze({
-    contextWindow: 272_000,
-    maxContextWindow: 872_000,
-    effectiveContextWindowPercent: 95,
-    reasoningEfforts: Object.freeze(['low', 'medium', 'high', 'xhigh', 'max']),
-    toolOutputTruncationPolicy: KNOWN_TOOL_OUTPUT_TRUNCATION_POLICY,
-  }),
+// Each tier advances independently. Only aliases follow releases; literal IDs
+// in saved configuration continue to refer to that exact model.
+export const CODEX_MODEL_ALIASES = Object.freeze({
+  astra: 'gpt-6.2-astra',
+  sol: 'gpt-6.2-sol',
+  terra: 'gpt-6.1-terra',
+  luna: 'gpt-6-luna',
 });
+
+const XHIGH_EFFORTS = Object.freeze(['low', 'medium', 'high', 'xhigh']);
+const MAX_EFFORTS = Object.freeze([...XHIGH_EFFORTS, 'max']);
+const ULTRA_EFFORTS = Object.freeze([...MAX_EFFORTS, 'ultra']);
+
+function knownModel(contextWindow, reasoningEfforts = ULTRA_EFFORTS, maxContextWindow = 872_000) {
+  return Object.freeze({
+    contextWindow,
+    maxContextWindow,
+    effectiveContextWindowPercent: 95,
+    reasoningEfforts,
+    toolOutputTruncationPolicy: KNOWN_TOOL_OUTPUT_TRUNCATION_POLICY,
+  });
+}
+
+// Offline defaults are keyed by literal ID, never by tier. A newly selected
+// alias must not inherit its predecessor's window or reasoning levels.
+const KNOWN_MODEL_CAPABILITIES = new Map([
+  ['gpt-6.2-astra', knownModel(272_000)],
+  ['gpt-6.2-sol', knownModel(500_000)],
+  ['gpt-6.1-terra', knownModel(500_000)],
+  ['gpt-6-luna', knownModel(272_000, MAX_EFFORTS)],
+  ['gpt-6-astra', knownModel(272_000)],
+  ['gpt-5.6-sol', knownModel(272_000)],
+  ['gpt-5.6-terra', knownModel(272_000)],
+  ['gpt-5.6-luna', knownModel(272_000, MAX_EFFORTS)],
+  ['gpt-5.4', knownModel(272_000, XHIGH_EFFORTS, 1_000_000)],
+]);
 
 const catalogCache = new Map();
 
@@ -114,7 +116,7 @@ export function readCodexModelCatalog(command, cwd, env, bundledOnly) {
   ]);
   const cached = catalogCache.get(cacheKey);
   if (cached) {
-    if (cached.catalog !== null || cached.expiresAt > Date.now()) {
+    if (cached.expiresAt > Date.now()) {
       return cached.catalog;
     }
     catalogCache.delete(cacheKey);
@@ -143,12 +145,9 @@ export function readCodexModelCatalog(command, cwd, env, bundledOnly) {
       catalog = null;
     }
   }
-  catalogCache.set(cacheKey, {
-    catalog,
-    // Successful metadata is deterministic for an executable/home identity.
-    // Retry transient spawn/parse failures after a short bounded quiet period.
-    expiresAt: catalog === null ? Date.now() + CATALOG_NEGATIVE_CACHE_TTL_MS : Infinity,
-  });
+  const ttl = catalog === null ? CATALOG_NEGATIVE_CACHE_TTL_MS :
+    bundledOnly ? Infinity : CATALOG_ONLINE_CACHE_TTL_MS;
+  catalogCache.set(cacheKey, { catalog, expiresAt: Date.now() + ttl });
   return catalog;
 }
 
@@ -196,7 +195,7 @@ function modelCapabilities(command, cwd, model, env) {
     return { ...discovered, source: 'codex-catalog' };
   }
 
-  const known = KNOWN_MODEL_CAPABILITIES[model];
+  const known = KNOWN_MODEL_CAPABILITIES.get(model);
   if (known) {
     return {
       ...known,

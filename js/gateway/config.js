@@ -5,22 +5,23 @@ import '../utils/env-loader.js';
 import { environmentWithoutManagedGatewayAuth } from '../utils/child-env.js';
 import { expandHomePath } from '../utils/safe-path.js';
 import {
+  CODEX_MODEL_ALIASES,
   normalizeCodexContextProfile,
   resolveCodexCapabilities,
 } from './codex-capabilities.js';
-import { DEEPSEEK_FLASH_DEFAULTS, QWEN_TOKEN_PLAN_DEFAULTS } from './provider-profiles.js';
+import { DEEPSEEK_FLASH_DEFAULTS, FABLE_MAIN_MODEL_ID, QWEN_TOKEN_PLAN_DEFAULTS } from './provider-profiles.js';
 
 const DEFAULT_EXPOSED_MODELS = Object.freeze([
-  'claude-fable-5-1',
+  FABLE_MAIN_MODEL_ID,
   'claude-sonnet-4-7',
   'claude-sonnet-4-5',
   'claude-haiku-4-5',
 ]);
-const DEFAULT_ANTHROPIC_PASSTHROUGH_MODELS = Object.freeze(['claude-fable-5-1*']);
+const DEFAULT_ANTHROPIC_PASSTHROUGH_MODELS = Object.freeze([`${FABLE_MAIN_MODEL_ID}*`]);
 
 const DEFAULT_CODEX_SANDBOX = 'workspace-write';
 const DEFAULT_CODEX_APPROVAL_POLICY = 'never';
-export const DEFAULT_CODEX_MODEL = 'gpt-6-astra';
+export const DEFAULT_CODEX_MODEL = CODEX_MODEL_ALIASES.astra;
 const DEFAULT_CODEX_AUTO_COMPACT_TOKEN_LIMIT_SCOPE = 'total';
 const DEFAULT_AUTH_FAILURE_RATE_LIMIT_WINDOW_MS = 60_000;
 const DEFAULT_AUTH_FAILURE_RATE_LIMIT_MAX_REQUESTS = 60;
