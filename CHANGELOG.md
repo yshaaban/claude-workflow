@@ -17,6 +17,8 @@
 - The installed-CLI suite checks actual tool advertisements and a Read, Edit,
   and MCP round trip on a 12,000-line file. The opt-in hosted smoke test checks
   account access and Claude Read against both models.
+- Update the HTTP dependencies used for proxy handling, request parsing, and
+  client transport. The standalone production lockfile passes `npm audit --omit=dev`.
 
 ## 0.4.1 - 2026-09-14
 
