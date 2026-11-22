@@ -29,8 +29,9 @@ function responseFrame(type, fields) {
   return 'event: ' + type + '\ndata: ' + JSON.stringify({ type, ...fields }) + '\n\n';
 }
 
-function respondAsCoordinator(res, body, delegate, file) {
-  assert.equal(body.model, 'claude-fable-5-2');
+function respondAsCoordinator(res, body, delegate, file, expectedModel, nativeEffort) {
+  assert.equal(body.model, expectedModel);
+  if (nativeEffort) assert.equal(body.output_config?.effort, nativeEffort, 'agent effort must not change the coordinator effort');
   assert.equal(body.stream, true);
   const agentId = 'toolu_native_worker';
   if (delegate) {
@@ -38,7 +39,7 @@ function respondAsCoordinator(res, body, delegate, file) {
   } else {
     const result = body.messages.flatMap(m => Array.isArray(m.content) ? m.content : [])
       .find(block => block.type === 'tool_result' && block.tool_use_id === agentId);
-    assert.ok(result && !result.is_error, 'Fable must receive the successful Agent result');
+    assert.ok(result && !result.is_error, 'coordinator must receive the successful Agent result');
     assert.match(JSON.stringify(result.content), /TOOL_LOOP_OK/u);
   }
   const block = delegate
@@ -50,7 +51,7 @@ function respondAsCoordinator(res, body, delegate, file) {
         prompt: 'Read and edit the marker in ' + file + ', then record completion using MCP.',
         run_in_background: false,
       }) }
-    : { type: 'text_delta', text: 'FABLE_AGENT_OK' };
+    : { type: 'text_delta', text: 'COORDINATOR_AGENT_OK' };
   const usage = { input_tokens: 100, output_tokens: 0 };
   res.writeHead(200, { 'content-type': 'text/event-stream' });
   res.end(responseFrame('message_start', { message: {
@@ -62,9 +63,16 @@ function respondAsCoordinator(res, body, delegate, file) {
     responseFrame('message_stop', {}));
 }
 
-for (const [tier, search, coordinated] of [['sol', false], ['astra', false], ['sol', true], ['astra', false, true]]) {
-  test((coordinated ? 'Fable delegates Agent to both installed CLIs for' : 'both installed CLIs execute') +
-    ' Read, Edit and MCP via GPT-6.2 ' + tier + (search ? ' with inherited deferred MCP settings' : ''),
+for (const { tier, search = false, coordinator, runnerEffort } of [
+  { tier: 'sol' }, { tier: 'astra' }, { tier: 'sol', search: true },
+  { tier: 'astra', coordinator: 'claude-fable-5-2' },
+  { tier: 'astra', coordinator: 'claude-opus-5-5', runnerEffort: 'low' },
+  { tier: 'astra', coordinator: 'claude-opus-5-5', runnerEffort: 'medium' },
+]) {
+  const nativeEffort = runnerEffort ? 'high' : null;
+  test((coordinator ? coordinator + ' delegates Agent via both installed CLIs:' : 'both installed CLIs execute') +
+    ' Read, Edit and MCP via GPT-6.2 ' + tier + (runnerEffort ? '/' + runnerEffort : '') +
+    (search ? ' with inherited deferred MCP settings' : ''),
     { skip: claude.skip || codex.skip, timeout: 45_000 }, async t => {
       const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'claude-codex-tool-loop-'));
       t.after(() => fs.rm(dir, { recursive: true, force: true, maxRetries: 3 }));
@@ -98,10 +106,10 @@ for (const [tier, search, coordinated] of [['sol', false], ['astra', false], ['s
           const raw = Buffer.concat(chunks);
           const decode = { br: brotliDecompressSync, gzip: gunzipSync }[req.headers['content-encoding']];
           const body = JSON.parse(decode ? decode(raw) : raw);
-          if (coordinated && /^\/v1\/messages(?:\?|$)/u.test(req.url)) {
+          if (coordinator && /^\/v1\/messages(?:\?|$)/u.test(req.url)) {
             const delegate = turnOrder.length === 0;
             turnOrder.push(delegate ? 'Agent' : 'resume');
-            respondAsCoordinator(res, body, delegate, file);
+            respondAsCoordinator(res, body, delegate, file, coordinator, nativeEffort);
             return;
           }
           assert.match(req.url, /\/responses(?:\?|$)/u);
@@ -110,6 +118,7 @@ for (const [tier, search, coordinated] of [['sol', false], ['astra', false], ['s
           turnOrder.push(step < toolSteps.length ? toolSteps[step][0] : 'agent answer');
           assert.ok(step <= toolSteps.length);
           assert.equal(body.model, model);
+          if (runnerEffort) assert.equal(body.reasoning?.effort, runnerEffort, 'wrong effort sent to Codex');
           if (!step) {
             // 0.171 can declare schemas in input's additional_tools items
             // instead of the top-level tools array. Both are model-visible.
@@ -156,25 +165,32 @@ for (const [tier, search, coordinated] of [['sol', false], ['astra', false], ['s
         CLAUDE_CONFIG_DIR: path.join(fixtureHome, '.claude'), WORKFLOW_FIXTURE_KEY: 'local-only',
         CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: '1', ENABLE_TOOL_SEARCH: String(search),
         MCP_CONNECTION_NONBLOCKING: '1',
-        NO_PROXY: '127.0.0.1', no_proxy: '127.0.0.1',
-        ULTRATHINK_GATEWAY_MAIN_PROVIDER: 'codex', ULTRATHINK_GATEWAY_CODEX_MODEL: model,
-        ULTRATHINK_GATEWAY_ANTHROPIC_PASSTHROUGH_MODELS: 'none' });
-      if (coordinated) {
-        delete env.ULTRATHINK_GATEWAY_ANTHROPIC_PASSTHROUGH_MODELS;
+        NO_PROXY: '127.0.0.1', no_proxy: '127.0.0.1' });
+      if (coordinator) {
         Object.assign(env, {
-          ULTRATHINK_GATEWAY_MAIN_PROVIDER: 'anthropic',
           ULTRATHINK_GATEWAY_ANTHROPIC_BASE_URL: 'http://127.0.0.1:' + upstream.address().port,
           ULTRATHINK_GATEWAY_ANTHROPIC_API_KEY: 'synthetic-upstream',
           ULTRATHINK_GATEWAY_SHARED_SECRET: 'synthetic-gateway',
           CLAUDE_CODE_DISABLE_TERMINAL_TITLE: '1',
         });
+        if (runnerEffort) {
+          // Persist the public profile, then launch a separate process with no
+          // model or reasoning env overrides. Assert both on the provider wire.
+          await run(process.execPath, [cli, 'config', '--main', 'opus', '--agents', 'astra',
+            '--effort', runnerEffort, '--context', 'long'], { cwd: dir, env, timeout: 10_000 });
+        }
+      } else {
+        Object.assign(env, { ULTRATHINK_GATEWAY_MAIN_PROVIDER: 'codex', ULTRATHINK_GATEWAY_CODEX_MODEL: model,
+          ULTRATHINK_GATEWAY_ANTHROPIC_PASSTHROUGH_MODELS: 'none',
+          ...(tier === 'sol' ? { ULTRATHINK_GATEWAY_SUBAGENT_UPSTREAM_MODEL: 'gpt-6.2-astra' } : {}) });
       }
       const mcpConfig = JSON.stringify({ mcpServers: { workflowfixture: { command: process.execPath, args: [mcp, marker] } } });
       let stdout;
       try {
         const command = run(process.execPath, [cli, '--', '--print', 'Read and edit the marker in ' + file + ' and record completion.',
-          '--strict-mcp-config', '--mcp-config', mcpConfig, '--output-format', 'json', '--tools', coordinated ? 'Agent,Read,Edit' : search ? 'Read,Edit,ToolSearch' : 'Read,Edit',
-          ...(coordinated ? ['--agents', JSON.stringify({ 'fixture-worker': {
+          '--strict-mcp-config', '--mcp-config', mcpConfig, '--output-format', 'json', '--tools', coordinator ? 'Agent,Read,Edit' : search ? 'Read,Edit,ToolSearch' : 'Read,Edit',
+          ...(nativeEffort ? ['--effort', nativeEffort] : []),
+          ...(coordinator ? ['--agents', JSON.stringify({ 'fixture-worker': {
             description: 'Update the specified file.', prompt: 'Use Read, Edit, and the provided MCP tool.',
           } })] : []),
           '--max-turns', '6'], { cwd: dir, env, timeout: 35_000, maxBuffer: 1024 * 1024 });
@@ -184,9 +200,9 @@ for (const [tier, search, coordinated] of [['sol', false], ['astra', false], ['s
       if (fixtureError) throw fixtureError;
       const result = JSON.parse(stdout.trim());
       assert.equal(result.is_error, false);
-      assert.equal(result.result, coordinated ? 'FABLE_AGENT_OK' : 'TOOL_LOOP_OK');
+      assert.equal(result.result, coordinator ? 'COORDINATOR_AGENT_OK' : 'TOOL_LOOP_OK');
       assert.equal(requests.length, toolSteps.length + 1);
-      if (coordinated) {
+      if (coordinator) {
         assert.deepEqual(turnOrder, ['Agent', 'Read', 'Edit', 'mcp__workflowfixture__record', 'agent answer', 'resume']);
       }
       assert.equal(await fs.readFile(file, 'utf8'), original.replace('TAIL_MARKER', 'CHANGED_MARKER'));

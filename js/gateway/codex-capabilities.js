@@ -4,6 +4,7 @@ import process from 'node:process';
 
 import { environmentWithoutGatewayAndAnthropicCredentials } from '../utils/child-env.js';
 import { effectiveCodexHome, executableIdentity } from '../utils/runtime-identity.js';
+import { GatewayError } from './model-routing.js';
 
 const DEFAULT_RAW_CONTEXT_TOKENS = 272_000;
 const DEFAULT_MAX_RAW_CONTEXT_TOKENS = 272_000;
@@ -30,10 +31,25 @@ const KNOWN_TOOL_OUTPUT_TRUNCATION_POLICY = Object.freeze({
 // in saved configuration continue to refer to that exact model.
 export const CODEX_MODEL_ALIASES = Object.freeze({
   astra: 'gpt-6.2-astra',
-  sol: 'gpt-6.2-sol',
   terra: 'gpt-6.1-terra',
   luna: 'gpt-6-luna',
 });
+
+// This is a workflow runner policy, not a limit on Codex's model catalog.
+export function assertWorkflowRunnerModel(provider, upstreamModel) {
+  if (provider !== 'codex' && provider !== 'openai') return;
+  const model = String(upstreamModel ?? '').trim().toLowerCase();
+  const isGpt62 = /^(?:codex-)?gpt-6\.2(?!\d)/u.test(model);
+  if (!isGpt62 && model !== 'sol' && model !== 'codex-sol') return;
+  if (/^gpt-6\.2-astra(?:-\d{4}-\d{2}-\d{2})?$/u.test(model)) return;
+  throw new GatewayError(
+    400,
+    'invalid_request_error',
+    `GPT-6.2 workflow runners require gpt-6.2-astra; "${model}" cannot run as a delegated model. ` +
+      'Run claude-workflow config --agents astra --effort low (or --effort medium). ' +
+      'If a route-map override selects this model, update that override too.'
+  );
+}
 
 const XHIGH_EFFORTS = Object.freeze(['low', 'medium', 'high', 'xhigh']);
 const MAX_EFFORTS = Object.freeze([...XHIGH_EFFORTS, 'max']);

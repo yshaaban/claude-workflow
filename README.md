@@ -45,7 +45,7 @@ allowing Git dependencies throughout the dependency tree:
 
 ```bash
 npm install --global --allow-git=root \
-  git+https://github.com/yshaaban/claude-workflow.git#v0.5.1
+  git+https://github.com/yshaaban/claude-workflow.git#v0.6.0
 ```
 
 Use a user-owned npm prefix, nvm, Volta, or another Node version manager if a
@@ -127,25 +127,28 @@ The launcher forces ordinary subagents to the selected Codex model using
 that explicitly inherit the main model remain exceptions. See
 [Claude's subagent model rules](https://code.claude.com/docs/en/sub-agents#run-every-subagent-on-one-model).
 
-Change the Codex tier, effort, or context profile with the configuration
-command:
+### Opus coordinator with Astra runners
+
+Use Opus 5.5 to plan the work and GPT-6.2 Astra to run delegated tasks:
 
 ```bash
-claude-workflow config --agents astra --effort max --context long
-claude-workflow config --agents terra --effort max --context long
-claude-workflow config --agents sol --effort max --context long
-claude-workflow config --agents luna --effort high --context standard
+claude-workflow config --main opus --agents astra --effort medium
+claude-workflow doctor
+claude-workflow
 ```
 
-The context profile sets Claude's launch-wide proactive-compaction ceiling.
-With the default Astra agents, `standard` lowers it to 244,800 tokens even
-when the main model is Fable 5.2 or Opus 5.5. With Sol agents, the standard
-compaction point is 450,000 tokens.
+For shorter reasoning on routine tasks, run `claude-workflow config --effort low`
+before starting the next session. Use `medium` for a larger reasoning budget.
+Both settings keep the runner on Astra. They do not change Opus's native
+effort, which you can set with `/effort` inside Claude Code.
 
-`astra` selects `gpt-6.2-astra`. For faster agents, use
-`claude-workflow config --agents sol --effort medium`. The other short names
-are `terra` for `gpt-6.1-terra` and `luna` for `gpt-6-luna`. You can also pin
-a full model ID available to your Codex workspace.
+Astra is the supported GPT-6.2 runner. A saved GPT-6.2 Sol runner pin stops
+the launch with migration instructions. Run
+`claude-workflow config --agents astra --effort low` to replace it. This leaves
+an Anthropic coordinator unchanged. Older families remain selectable, including
+`terra` for `gpt-6.1-terra` and
+`luna` for `gpt-6-luna`. Explicit direct-main Sol routes can use a separate
+Astra runner.
 
 ### Native Ultracode mode
 
@@ -176,7 +179,7 @@ Codex CLI 0.171.0 advertises these limits:
 | Model and profile | Raw Codex window | Usable window exposed to Claude | Native compaction point |
 | --- | ---: | ---: | ---: |
 | Astra standard | 272,000 | 258,400 | 244,800 |
-| Sol standard | 500,000 | 475,000 | 450,000 |
+| Sol standard (direct main only) | 500,000 | 475,000 | 450,000 |
 | Astra or Sol long | 872,000 | 828,400 | 784,800 |
 
 `long` is the Claude Workflow default. These values make Codex a long-context
@@ -335,7 +338,7 @@ endpoints must use HTTPS; plain HTTP is accepted only for a loopback service.
 Qwen's provider context window is 1,000,000 tokens; 983,616 is Alibaba's maximum
 input in thinking mode and Claude Workflow's safe route ceiling. When Codex
 agents are enabled, Claude Code uses the smaller common custom-model limit
-described in [Default routing](#default-routing). With Astra or Sol in the long
+described in [Default routing](#default-routing). With Astra agents in the long
 profile, the client maximum is 828,400 and compaction begins at 784,800.
 
 Qwen reasoning is preserved across tool continuations. Deep-thinking mode
@@ -652,14 +655,15 @@ Install the supported GitHub tag, verify the installed version, then run setup:
 
 ```bash
 npm install --global --allow-git=root \
-  git+https://github.com/yshaaban/claude-workflow.git#v0.5.1
+  git+https://github.com/yshaaban/claude-workflow.git#v0.6.0
 claude-workflow --version
 claude-workflow setup
 ```
 
-Upgrading the package preserves saved model IDs and shell overrides. To keep
-your existing routes, no configuration changes are needed. To switch to the
-current Fable coordinator and Astra agents, run:
+Upgrading preserves your settings. If you previously selected GPT-6.2 Sol for
+agents, run `claude-workflow config --agents astra --effort low`. If you set
+Sol in a shell or route-map override, update that override as well. Other
+supported runner pins need no changes. To select Fable and Astra explicitly:
 
 ```bash
 claude-workflow config --main fable --agents astra --effort max --context long

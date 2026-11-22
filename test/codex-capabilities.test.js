@@ -5,6 +5,7 @@ import path from 'node:path';
 import test from 'node:test';
 
 import {
+  assertWorkflowRunnerModel,
   clearCodexCapabilityCacheForTests,
   resolveCodexCapabilities,
 } from '../js/gateway/codex-capabilities.js';
@@ -38,6 +39,7 @@ const MANAGED_ENV = [
   'ULTRATHINK_GATEWAY_MAIN_PROVIDER',
   'ULTRATHINK_GATEWAY_MAIN_REASONING_EFFORT',
   'ULTRATHINK_GATEWAY_MAIN_UPSTREAM_MODEL',
+  'ULTRATHINK_GATEWAY_OPENAI_API_KEY',
   'ULTRATHINK_GATEWAY_ROUTE_MAP_JSON',
   'ULTRATHINK_GATEWAY_SHARED_SECRET',
   'ULTRATHINK_GATEWAY_SUBAGENT_MODEL_ID',
@@ -69,6 +71,62 @@ async function withEnvironment(values, callback) {
     clearCodexCapabilityCacheForTests();
   }
 }
+
+test('the workflow runner floor only permits Astra in the GPT-6.2 family', () => {
+  for (const provider of ['codex', 'openai']) {
+    for (const model of [
+      'gpt-6.2-astra', 'gpt-6.2-astra-2026-11-22', 'gpt-6.1-sol',
+      'gpt-5.6-terra-2026-07-04', 'gpt-6.20-sol',
+    ]) {
+      assert.doesNotThrow(() => assertWorkflowRunnerModel(provider, model));
+    }
+    for (const model of [
+      'gpt-6.2', 'gpt-6.2-sol', 'gpt-6.2-sol-2026-11-22', 'gpt-6.2-terra',
+      'gpt-6.2-astra-mini', 'gpt-6.2-astra-2026-11', 'sol', 'codex-sol',
+    ]) {
+      assert.throws(() => assertWorkflowRunnerModel(provider, model), {
+        status: 400, type: 'invalid_request_error', message: /claude-workflow config --agents astra --effort low/,
+      });
+    }
+  }
+  assert.doesNotThrow(() => assertWorkflowRunnerModel('anthropic', 'claude-opus-5-5'));
+  assert.doesNotThrow(() => assertWorkflowRunnerModel('qwen', 'gpt-6.2-sol'));
+});
+
+test('managed workflow preflight checks the final runner, including overrides and same-model sessions', async () => {
+  const solRoute = JSON.stringify({ 'codex-*': { provider: 'codex', model: 'gpt-6.2-sol' } });
+  for (const values of [
+    { ULTRATHINK_GATEWAY_SUBAGENT_UPSTREAM_MODEL: 'gpt-6.2-sol' },
+    { ULTRATHINK_GATEWAY_SUBAGENT_UPSTREAM_MODEL: 'codex-sol' },
+    { ULTRATHINK_GATEWAY_MAIN_PROVIDER: 'codex', ULTRATHINK_GATEWAY_CODEX_MODEL: 'gpt-6.2-sol' },
+    { ULTRATHINK_GATEWAY_ROUTE_MAP_JSON: solRoute },
+    { CLAUDE_WORKFLOW_SUBAGENT_MODEL_ID: 'codex-astra', ULTRATHINK_GATEWAY_ROUTE_MAP_JSON: solRoute },
+    {
+      ULTRATHINK_GATEWAY_OPENAI_API_KEY: 'test-openai',
+      ULTRATHINK_GATEWAY_ANTHROPIC_API_KEY: 'test-anthropic',
+      ULTRATHINK_GATEWAY_ROUTE_MAP_JSON: JSON.stringify({
+        'claude-sonnet-*': { provider: 'openai', model: 'gpt-6.2-sol' },
+      }),
+    },
+  ]) {
+    await withEnvironment({ ULTRATHINK_GATEWAY_CODEX_COMMAND: '/definitely/missing/codex', ...values }, () => {
+      assert.throws(() => buildWorkflowGatewayConfig(), /claude-workflow config --agents astra --effort low/);
+    });
+  }
+  await withEnvironment({
+    ULTRATHINK_GATEWAY_CODEX_COMMAND: '/definitely/missing/codex',
+    ULTRATHINK_GATEWAY_MAIN_PROVIDER: 'codex',
+    ULTRATHINK_GATEWAY_MAIN_UPSTREAM_MODEL: 'gpt-6.2-sol',
+    ULTRATHINK_GATEWAY_SUBAGENT_UPSTREAM_MODEL: 'gpt-6.2-astra',
+    ULTRATHINK_GATEWAY_SUBAGENT_REASONING_EFFORT: 'low',
+  }, () => {
+    const { config, mainModelId, subagentRoute } = buildWorkflowGatewayConfig();
+    assert.equal(config.workflowRunnerAstraFloor, true);
+    assert.equal(resolveModelRoute(mainModelId, config).upstreamModel, 'gpt-6.2-sol');
+    assert.equal(subagentRoute.upstreamModel, 'gpt-6.2-astra');
+    assert.equal(subagentRoute.reasoningEffort, 'low');
+  });
+});
 
 test('Codex Astra fallback exposes the app-server window, not the API marketing window', () => {
   for (const [profile, raw, usable, compact] of [

@@ -15,14 +15,21 @@ against the latest releases. Neither test grants access to a model.
 | Setting | Current selection |
 | --- | --- |
 | Main coordinator | Anthropic `claude-fable-5-2` |
+| `--main opus` | Anthropic `claude-opus-5-5` |
 | `--agents astra` (default) | `gpt-6.2-astra`, exposed as `codex-astra` |
-| `--agents sol` | `gpt-6.2-sol`, exposed as `codex-sol` |
 | `--agents terra` | `gpt-6.1-terra` |
 | `--agents luna` | `gpt-6-luna` |
 
 Full model IDs are exact pins. To move an existing installation to the new
 default, run `claude-workflow config --main fable --agents astra --effort max --context long`,
 then `claude-workflow setup` and start a new session.
+
+For Opus 5.5 orchestration, run `claude-workflow config --main opus --agents astra --effort medium`.
+Choose `low` for less runner reasoning without changing models. The gateway
+rejects a GPT-6.2 Sol runner instead of changing its model silently. A direct
+Codex main route can still use `gpt-6.2-sol` with a separate Astra runner.
+This check governs the model the gateway requests. It does not override
+provider-side safety routing.
 
 ## Context belongs to the selected runtime
 
@@ -33,7 +40,7 @@ window to Claude. Codex 0.171.0 reports these values:
 | Model and profile | Raw context | Usable | Proactive compaction |
 | --- | ---: | ---: | ---: |
 | GPT-6.2 Astra, standard | 272,000 | 258,400 | 244,800 |
-| GPT-6.2 Sol, standard | 500,000 | 475,000 | 450,000 |
+| GPT-6.2 Sol direct main, standard | 500,000 | 475,000 | 450,000 |
 | Either model, long (default) | 872,000 | 828,400 | 784,800 |
 
 A raw override is clamped to the selected model's maximum. A `[1m]` suffix
@@ -101,9 +108,10 @@ if either executable is missing. It checks actual tool advertisements on the
 model request, exercises Claude's coordinator and effort behavior, and runs a
 complete Claude–Codex loop for both Astra and Sol. Each loop reads and edits a
 marker near the end of a 12,000-line file, calls an MCP server, and checks the
-result and number of upstream requests. A coordinated case also starts the
-agent from Fable and checks that Fable receives its result in exactly one
-resume request.
+result and number of upstream requests. Coordinated cases start Astra from
+Fable 5.2 or Opus 5.5 and verify a single coordinator resume. The Opus cases
+check the upstream model and effort on every request: Opus stays at high
+while Astra runs at low or medium.
 
 These tests use real CLIs and controlled provider responses. They test protocol
 compatibility without sending project files or using provider credits. They do

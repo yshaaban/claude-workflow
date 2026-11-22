@@ -13,8 +13,9 @@ import {
   translateOpenAiResponseToAnthropic,
 } from './anthropic-format.js';
 import { isGatewayLoopbackHost, loadGatewayConfig } from './config.js';
+import { assertWorkflowRunnerModel } from './codex-capabilities.js';
 import { estimateCodexRequestTokens } from './codex-content.js';
-import { CodexSessionManager } from './codex-provider.js';
+import { CodexSessionManager, isClaudeWorkflowAgentRequest } from './codex-provider.js';
 import { GatewayError, listGatewayModels, resolveModelRoute } from './model-routing.js';
 import { gatewayProviderProfile, providerRequiresGatewayAuth } from './provider-profiles.js';
 import { proxyUrlForTarget } from './proxy.js';
@@ -1822,8 +1823,16 @@ async function handleCodexStream(req, res, config, codexSessions, route, signal,
   );
 }
 
-async function handleCountTokens(req, res, config, signal) {
+function resolveRequestRoute(req, config) {
   const route = resolveModelRoute(req.body?.model, config);
+  if (config.workflowRunnerAstraFloor && isClaudeWorkflowAgentRequest(req)) {
+    assertWorkflowRunnerModel(route.provider, route.upstreamModel);
+  }
+  return route;
+}
+
+async function handleCountTokens(req, res, config, signal) {
+  const route = resolveRequestRoute(req, config);
   switch (route.tokenCountPolicy) {
     case 'upstream': {
       const providerConfig = anthropicCompatibleProviderConfig(config, route);
@@ -2062,7 +2071,7 @@ export function createGatewayApp(config = loadGatewayConfig(), codexSessions = n
       let route = null;
 
       try {
-        route = resolveModelRoute(req.body?.model, config);
+        route = resolveRequestRoute(req, config);
         requestTracer?.log?.('gateway.route.resolved', {
           ...summarizeGatewayTraceContext(req, route),
           route: summarizeRoute(route),

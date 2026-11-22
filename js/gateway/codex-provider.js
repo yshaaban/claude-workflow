@@ -2493,7 +2493,7 @@ function requestHeader(req, name) {
   return String(req.get(name) || '').trim();
 }
 
-function isClaudeWorkflowAgentRequest(req) {
+export function isClaudeWorkflowAgentRequest(req) {
   const agentId = requestHeader(req, 'x-claude-code-agent-id');
   const parentAgentId = requestHeader(req, 'x-claude-code-parent-agent-id');
   return Boolean(agentId || parentAgentId);

@@ -37,6 +37,11 @@ default `gpt-6.2-astra` route is absent, run
 your Codex workspace. The interactive Codex `/model` picker shows available
 choices.
 
+For GPT-6.2 runners, select Astra. If a saved Sol runner pin prevents startup,
+run `claude-workflow config --agents astra --effort low` or choose `medium`.
+For a custom route map or exported environment override, change the effective
+agent target there too. Run `claude-workflow doctor` to check the result.
+
 Direct Codex, Kimi, Qwen, and DeepSeek use documented per-session custom-model settings;
 Claude Workflow does not modify `.claude.json`, user settings, or project
 settings. Kimi uses its own provider route and does not need to appear in the

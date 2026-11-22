@@ -10,7 +10,7 @@ import crypto from 'node:crypto';
 import process from 'node:process';
 
 import { envFlag, loadGatewayConfig } from './config.js';
-import { resolveCodexCapabilities } from './codex-capabilities.js';
+import { assertWorkflowRunnerModel, resolveCodexCapabilities } from './codex-capabilities.js';
 import {
   ROUTE_ENTRY_REASONING_KEYS,
   ROUTE_ENTRY_UPSTREAM_MODEL_KEYS,
@@ -626,8 +626,6 @@ export function buildWorkflowGatewayConfig({
     // documented user wildcard cannot be shadowed by workflow defaults.
     ...mainFamilyFallbackRouteMap,
   };
-  const selectedSubagentRoute = routeMap[subagentModelId] || finalSubagentRoute;
-  assertTruthfulCustomModelId(subagentModelId, selectedSubagentRoute);
   const resolvedMainProvider = routeProvider(routeMap[mainModelId], mainProvider);
   assertTruthfulCustomModelId(
     mainModelId,
@@ -703,6 +701,7 @@ export function buildWorkflowGatewayConfig({
 
   const config = {
     ...baseConfig,
+    workflowRunnerAstraFloor: true,
     sharedSecret,
     host: host ?? envString('ULTRATHINK_GATEWAY_HOST', baseConfig.host || '127.0.0.1'),
     port: port ?? parseRequestedPort(defaultPort),
@@ -728,8 +727,10 @@ export function buildWorkflowGatewayConfig({
     ]),
   };
   validateNativeAnthropicFallbacks(config, mainModelId, nativeFallbackModels);
-  validateEffectiveCodexRoutes(config);
   const effectiveSubagentRoute = resolveModelRoute(subagentModelId, config);
+  assertWorkflowRunnerModel(effectiveSubagentRoute.provider, effectiveSubagentRoute.upstreamModel);
+  assertTruthfulCustomModelId(subagentModelId, effectiveSubagentRoute);
+  validateEffectiveCodexRoutes(config);
   const subagentCapabilities =
     routeProvider(effectiveSubagentRoute, '') === 'codex'
       ? codexCapabilitiesForRoute(config, effectiveSubagentRoute)

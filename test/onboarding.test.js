@@ -1217,7 +1217,7 @@ test(
     for (const [alias, expected] of [
       ['terra', 'gpt-6.1-terra'],
       ['astra', 'gpt-6.2-astra'],
-      ['sol', 'gpt-6.2-sol'],
+      ['gpt-5.6-sol', 'gpt-5.6-sol'],
       ['luna', 'gpt-6-luna'],
       ['gpt-6-astra', 'gpt-6-astra'],
       ['gpt-9-custom', 'gpt-9-custom'],
@@ -1333,6 +1333,31 @@ test(
   }
 );
 
+test('an old GPT-6.2 Sol runner pin requires an explicit, atomic migration to Astra', async (t) => {
+  const home = await temporaryDirectory(t, 'claude-workflow-runner-floor-');
+  const env = isolatedEnvironment(home, { ULTRATHINK_GATEWAY_CODEX_COMMAND: '/missing/codex' });
+  const configPath = path.join(home, '.claude-workflow.env');
+  const previous = 'ULTRATHINK_GATEWAY_CODEX_MODEL=gpt-6.2-sol\n' +
+    'ULTRATHINK_GATEWAY_SUBAGENT_UPSTREAM_MODEL=gpt-6.2-sol\n# retain my other settings\n';
+  await fsp.writeFile(configPath, previous, { mode: 0o600 });
+  for (const args of [[], ['--effort', 'low'], ['--agents', 'sol'], ['--agents', 'GPT-6.2-SOL'],
+    ['--agents', 'gpt-6.2-sol-2026-11-01']]) {
+    const rejected = runCli(['config', ...args], { env });
+    assert.notEqual(rejected.status, 0);
+    assert.match(rejected.stderr, /--agents astra --effort (?:low|medium)/u);
+    assert.equal(await fsp.readFile(configPath, 'utf8'), previous);
+  }
+  const repaired = runCli(['config', '--main', 'opus', '--agents', 'astra', '--effort', 'medium'], { env });
+  assert.equal(repaired.status, 0, repaired.stderr);
+  const result = runCli(['config', '--json'], { env });
+  assert.equal(result.status, 0, result.stderr);
+  const { main, agents } = JSON.parse(result.stdout);
+  assert.equal(main.model, 'claude-opus-5-5');
+  assert.equal(agents.model, 'gpt-6.2-astra');
+  assert.equal(agents.effort, 'medium');
+  assert.match(await fsp.readFile(configPath, 'utf8'), /# retain my other settings/u);
+});
+
 test(
   'config supports short names, reports effective values, and resets managed settings',
   { skip: process.platform === 'win32' },
@@ -1343,23 +1368,23 @@ test(
     const env = isolatedEnvironment(home);
 
     const update = runCli(
-      ['config', '--main', 'fable', '--agents', 'sol', '--effort', 'high', '--permissions', 'prompt'],
+      ['config', '--main', 'fable', '--agents', 'astra', '--effort', 'low', '--permissions', 'prompt'],
       { env }
     );
     assert.equal(update.status, 0, update.stderr);
     const configPath = path.join(home, '.claude-workflow.env');
     const content = await fsp.readFile(configPath, 'utf8');
     assert.match(content, /^ULTRATHINK_GATEWAY_MAIN_MODEL_ID=claude-fable-5-2$/mu);
-    assert.match(content, /ULTRATHINK_GATEWAY_SUBAGENT_UPSTREAM_MODEL=gpt-6\.2-sol/u);
-    assert.match(content, /ULTRATHINK_GATEWAY_SUBAGENT_REASONING_EFFORT=high/u);
+    assert.match(content, /ULTRATHINK_GATEWAY_SUBAGENT_UPSTREAM_MODEL=gpt-6\.2-astra/u);
+    assert.match(content, /ULTRATHINK_GATEWAY_SUBAGENT_REASONING_EFFORT=low/u);
     assert.match(content, /CLAUDE_WORKFLOW_SKIP_PERMISSIONS=false/u);
     assert.equal((await fsp.stat(configPath)).mode & 0o777, 0o600);
 
     const show = runCli(['config'], { env });
     assert.equal(show.status, 0, show.stderr);
     assert.match(show.stdout, /Main\s+Fable 5\.2 -> anthropic \(claude-fable-5-2\)/u);
-    assert.match(show.stdout, /Agents\s+Sol -> codex \(gpt-6\.2-sol\)/u);
-    assert.match(show.stdout, /Reasoning\s+high/u);
+    assert.match(show.stdout, /Agents\s+Astra -> codex \(gpt-6\.2-astra\)/u);
+    assert.match(show.stdout, /Reasoning\s+low/u);
     assert.match(show.stdout, /Permissions\s+prompt/u);
 
     const opus = runCli(['config', '--main', 'opus'], { env });
@@ -1648,24 +1673,24 @@ test(
     assert.equal(update.status, 0, update.stderr);
     assert.doesNotMatch(update.stdout, /setup --prepare-claude/u);
 
-    const retune = runCli(['config', '--agents', 'sol', '--effort', 'ultra'], { env });
+    const retune = runCli(['config', '--agents', 'terra', '--effort', 'ultra'], { env });
     assert.equal(retune.status, 0, retune.stderr);
 
     const configPath = path.join(home, '.claude-workflow.env');
     const content = await fsp.readFile(configPath, 'utf8');
     assert.match(content, /ULTRATHINK_GATEWAY_MAIN_MODEL_ID=codex/u);
     assert.match(content, /ULTRATHINK_GATEWAY_MAIN_PROVIDER=codex/u);
-    assert.match(content, /ULTRATHINK_GATEWAY_MAIN_UPSTREAM_MODEL=gpt-6\.2-sol/u);
+    assert.match(content, /ULTRATHINK_GATEWAY_MAIN_UPSTREAM_MODEL=gpt-6\.1-terra/u);
     assert.match(content, /ULTRATHINK_GATEWAY_MAIN_REASONING_EFFORT=ultra/u);
-    assert.match(content, /ULTRATHINK_GATEWAY_SUBAGENT_UPSTREAM_MODEL=gpt-6\.2-sol/u);
+    assert.match(content, /ULTRATHINK_GATEWAY_SUBAGENT_UPSTREAM_MODEL=gpt-6\.1-terra/u);
     assert.match(content, /ULTRATHINK_GATEWAY_SUBAGENT_REASONING_EFFORT=ultra/u);
 
     const show = runCli(['config'], { env });
     assert.equal(show.status, 0, show.stderr);
-    assert.match(show.stdout, /Main\s+codex-sol -> codex \(codex-sol\)/u);
+    assert.match(show.stdout, /Main\s+codex-terra -> codex \(codex-terra\)/u);
     const json = runCli(['config', '--json'], { env });
     assert.equal(json.status, 0, json.stderr);
-    assert.equal(JSON.parse(json.stdout).main.target, 'codex:gpt-6.2-sol/ultra');
+    assert.equal(JSON.parse(json.stdout).main.target, 'codex:gpt-6.1-terra/ultra');
 
     const resetMain = runCli(['config', '--main', 'fable'], { env });
     assert.equal(resetMain.status, 0, resetMain.stderr);

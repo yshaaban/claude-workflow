@@ -35,6 +35,61 @@ test('Codex count_tokens estimates inline images as visual inputs, not base64 te
   assert.equal(await count(1024 * 1024), small);
 });
 
+test('managed workflows check delegated message and token-count routes after resolving aliases', async (t) => {
+  const received = [];
+  const upstream = http.createServer(async (req, res) => {
+    received.push(JSON.parse((await readBody(req)).toString('utf8')).model);
+    res.writeHead(200, { 'content-type': 'application/json' });
+    res.end(JSON.stringify({
+      id: 'test', choices: [{ message: { role: 'assistant', content: 'ok' }, finish_reason: 'stop' }],
+    }));
+  });
+  const address = await listen(upstream);
+  t.after(() => closeServer(upstream));
+  const upstreamUrl = `http://127.0.0.1:${address.port}/`;
+  const options = {
+    anthropicPassthroughModels: [],
+    codex: { enabled: true, model: 'gpt-6.2-astra', command: '/definitely/missing/codex' },
+    openai: { apiKey: UPSTREAM_SECRET, baseUrl: upstreamUrl, reasoningEffort: 'low' },
+    routeMap: {
+      'main-openai': { provider: 'openai', model: 'gpt-6.2-sol' },
+      'codex-runner-*': { provider: 'codex', model: 'gpt-6.2-sol-2026-11-22' },
+      'astra-runner': { provider: 'openai', model: 'gpt-6.2-astra' },
+    },
+  };
+  const managed = await startGateway(upstreamUrl, { ...options, workflowRunnerAstraFloor: true });
+  const standalone = await startGateway(upstreamUrl, options);
+  t.after(() => managed.runtime.close());
+  t.after(() => standalone.runtime.close());
+  const post = (gateway, path, model, extraHeaders = {}) => rawPost(
+    `${gateway.url}/v1/messages${path}`, gatewayHeaders(extraHeaders),
+    JSON.stringify({ model, max_tokens: 64, messages: [{ role: 'user', content: 'ping' }] })
+  );
+  for (const path of ['', '/count_tokens']) {
+    for (const [model, header] of [
+      ['main-openai', 'x-claude-code-agent-id'],
+      ['codex-runner-deep', 'x-claude-code-parent-agent-id'],
+    ]) {
+      const blocked = await post(managed, path, model, { [header]: 'child' });
+      assert.equal(blocked.status, 400, blocked.body);
+      const error = JSON.parse(blocked.body).error;
+      assert.equal(error.type, 'invalid_request_error');
+      assert.match(error.message, /claude-workflow config --agents astra --effort low/);
+    }
+  }
+  assert.deepEqual(received, []);
+  const child = { 'x-claude-code-agent-id': 'child' };
+  for (const [gateway, model, headers] of [
+    [managed, 'main-openai', {}], [managed, 'astra-runner', child], [standalone, 'main-openai', child],
+  ]) {
+    for (const path of ['', '/count_tokens']) {
+      const response = await post(gateway, path, model, headers);
+      assert.equal(response.status, 200, response.body);
+    }
+  }
+  assert.deepEqual(received, ['gpt-6.2-sol', 'gpt-6.2-astra', 'gpt-6.2-sol']);
+});
+
 test('GPT-6.2 Chat routes omit sampling parameters and require Responses for tools', () => {
   const text = { messages: [{ role: 'user', content: 'test' }], max_tokens: 128, temperature: 1, top_p: 0.5 };
   for (const upstreamModel of ['gpt-6.2-sol', 'gpt-6.2-astra', 'gpt-6.2-sol-2026-11-01']) {

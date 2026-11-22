@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.6.0 - 2026-11-22
+
+- Astra is the supported GPT-6.2 runner. If you used Sol for agents, run
+  `claude-workflow config --agents astra --effort low` or update the shell
+  or route-map override that selects Sol. The launcher reports an unsupported
+  pin instead of silently changing it. An explicit Sol coordinator can still
+  use a separate Astra runner.
+- Use `claude-workflow config --main opus --agents astra --effort medium` for
+  Opus 5.5 with Astra, or select `low` for shorter reasoning. The installed-CLI
+  suite covers both settings, including file edits and MCP tools, and checks
+  that the coordinator keeps its own effort.
+
 ## 0.5.1 - 2026-11-22
 
 - Correct the context examples in the installation guide. Codex 0.171.0's

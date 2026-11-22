@@ -9,6 +9,7 @@ import { fileURLToPath } from 'node:url';
 import { unsafeWslInstallPaths } from '../../scripts/validate-local-install.mjs';
 import {
   CODEX_MODEL_ALIASES,
+  assertWorkflowRunnerModel,
   resolveCodexCapabilities,
 } from '../gateway/codex-capabilities.js';
 import {
@@ -892,9 +893,11 @@ function normalizeModel(value, label) {
 function agentModel(value) {
   const trimmed = String(value || '').trim();
   const normalized = trimmed.toLowerCase();
-  return Object.hasOwn(CODEX_MODEL_ALIASES, normalized)
+  const model = Object.hasOwn(CODEX_MODEL_ALIASES, normalized)
     ? CODEX_MODEL_ALIASES[normalized]
     : normalizeModel(trimmed, '--agents');
+  assertWorkflowRunnerModel('codex', model);
+  return model;
 }
 
 function configUsage() {
@@ -903,7 +906,7 @@ function configUsage() {
     '  claude-workflow config',
     '  claude-workflow config --agents astra --effort max --context long',
     '  claude-workflow config --main fable --permissions bypass',
-    '  claude-workflow config --main opus',
+    '  claude-workflow config --main opus --agents astra --effort medium',
     '  claude-workflow config --main codex',
     '  claude-workflow config --main kimi',
     '  claude-workflow config --main qwen',
@@ -912,8 +915,9 @@ function configUsage() {
     '',
     'Options:',
     '  --main <opus|fable|codex|kimi|k3|qwen|deepseek|anthropic-model-id>  Main route; deepseek selects V4.1 Flash',
-    '  --agents <astra|sol|terra|luna|id>  Shared Codex model for agents and direct main',
+    '  --agents <astra|terra|luna|id>  Shared Codex model for agents and direct main',
     '  --effort <level>              Codex effort, validated against the selected model catalog',
+    '                                For fast GPT-6.2 agents, use astra with low or medium effort.',
     '  --context <standard|long>     Codex context profile; also sets the launch-wide shared compaction ceiling',
     '  --permissions <mode>          bypass or prompt',
     '  --reset                       Remove settings managed by this command',
