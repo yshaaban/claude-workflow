@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.5.1 - 2026-11-22
+
+- Correct the context examples in the installation guide. Codex 0.171.0's
+  bundled catalog contains no literal 1M model. GPT-6.2 Astra and Sol both
+  expose 828,400 usable tokens in the long profile. No runtime changes.
+
 ## 0.5.0 - 2026-11-22
 
 - Fable 5.2 coordinates GPT-6.2 Astra agents by default. Select Sol with

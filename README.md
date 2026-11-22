@@ -39,13 +39,13 @@ installing under WSL.
 
 ## Getting started
 
-Install release `v0.5.0` from the canonical GitHub repository. npm 12 blocks
+Install release `v0.5.1` from the canonical GitHub repository. npm 12 blocks
 Git dependencies by default, so the command grants access only to the package
 named on the command line:
 
 ```bash
 npm install --global --allow-git=root \
-  git+https://github.com/yshaaban/claude-workflow.git#v0.5.0
+  git+https://github.com/yshaaban/claude-workflow.git#v0.5.1
 ```
 
 Use a user-owned npm prefix, nvm, Volta, or another Node version manager if a
@@ -194,25 +194,10 @@ option without misreporting its exact window as 1,000,000 tokens.
 If a future Codex release changes the catalog, the gateway follows the installed
 catalog and clamps explicit overrides to the model's advertised maximum.
 
-Literal 1,000,000-token Codex models are supported when the installed catalog
-advertises them. For example, Codex CLI 0.171.0 gives `gpt-5.4` a 1,000,000
-raw / 950,000 usable long profile:
-
-```bash
-claude-workflow config --agents gpt-5.4 --effort xhigh --context long
-```
-
-To use that literal 1M model for both the main session and agents:
-
-```bash
-claude-workflow config --main codex --agents gpt-5.4 --effort xhigh --context long
-```
-
-Because both routes have the same truthful ID, Claude's picker shows one
-`codex-gpt-5.4` row.
-
-This is an explicit compatibility choice, not a recommendation to replace
-Astra with an older model for its context window alone. The
+If your catalog advertises a 1,000,000-token raw window with a 95% usable
+allowance, `--context long` exposes 950,000 tokens. No model in Codex 0.171.0's
+bundled catalog advertises that raw window. Run `codex debug models` to check
+the models available to your account. The
 [GPT-6.2 Astra API](https://developers.openai.com/api/docs/models/gpt-6.2-astra)
 advertises 1,050,000 tokens, but the installed Codex app-server catalog is the
 authority for this integration. A `[1m]` label does not enlarge that window.
@@ -360,10 +345,8 @@ endpoints must use HTTPS; plain HTTP is accepted only for a loopback service.
 Qwen's provider context window is 1,000,000 tokens; 983,616 is Alibaba's maximum
 input in thinking mode and Claude Workflow's safe route ceiling. When Codex
 agents are enabled, Claude Code uses the smaller common custom-model limit
-described in [Default routing](#default-routing). With literal-1M `gpt-5.4`
-agents, the client maximum is 950,000 and proactive compaction begins at
-900,000, leaving 83,616 tokens of input headroom below the thinking-mode input
-limit.
+described in [Default routing](#default-routing). With Astra or Sol in the long
+profile, the client maximum is 828,400 and compaction begins at 784,800.
 
 Qwen reasoning is preserved across tool continuations. Deep-thinking mode
 supports `tool_choice` values `auto` and `none`; required or named choices fail
@@ -679,7 +662,7 @@ Reinstall this release, then run the setup checks and upgrade maintenance:
 
 ```bash
 npm install --global --allow-git=root \
-  git+https://github.com/yshaaban/claude-workflow.git#v0.5.0
+  git+https://github.com/yshaaban/claude-workflow.git#v0.5.1
 claude-workflow setup
 ```
 
