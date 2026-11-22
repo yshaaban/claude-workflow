@@ -969,3 +969,19 @@ test('workflow rejects unsupported effort on an effective custom Codex route', a
     }
   );
 });
+
+test('a route selecting the base Codex model must still validate its own effort', async () => {
+  await withEnvironment({
+    ULTRATHINK_GATEWAY_CODEX_COMMAND: '/definitely/missing/codex',
+    ULTRATHINK_GATEWAY_CODEX_MODEL: 'gpt-5.4',
+    ULTRATHINK_GATEWAY_CODEX_REASONING_EFFORT: 'xhigh',
+    ULTRATHINK_GATEWAY_SUBAGENT_REASONING_EFFORT: 'xhigh',
+    ULTRATHINK_GATEWAY_ROUTE_MAP_JSON: JSON.stringify({
+      custom: { provider: 'codex', upstream_model: 'gpt-5.4', reasoning_effort: 'max' },
+    }),
+  }, () => {
+    assert.throws(() => buildWorkflowGatewayConfig(), {
+      message: 'Codex route custom uses gpt-5.4 with unsupported reasoning effort max; choose one of low, medium, high, xhigh',
+    });
+  });
+});

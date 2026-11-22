@@ -6804,11 +6804,10 @@ await runTest('gateway enforces auth for /v1 and exposes Claude-shaped model dis
 });
 
 await runTest('non-loopback health checks hide diagnostics without gateway auth', async function testGatewayHealthPrivacy() {
-  const gatewayPort = await freePort();
   const runtime = createGatewayServer(
     gatewayConfig({
       host: '0.0.0.0',
-      port: gatewayPort,
+      port: 0,
       sharedSecret: 'health-secret',
       runtimeRevision: 'private-revision',
       traceDir: '/tmp/private-example-trace',
@@ -6816,6 +6815,7 @@ await runTest('non-loopback health checks hide diagnostics without gateway auth'
     })
   );
   await waitForListening(runtime.server);
+  const gatewayPort = runtime.server.address().port;
 
   try {
     const unauthenticated = await fetch(`http://127.0.0.1:${gatewayPort}/healthz`);

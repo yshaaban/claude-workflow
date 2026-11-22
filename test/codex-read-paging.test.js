@@ -300,6 +300,31 @@ function replay(body, codex, bootstrapMode) {
   return session.prepareInitialTurnInput(body).text;
 }
 
+test('live results and both rebuild modes bind Read notices to the same tool output', () => {
+  const content = '1\tone\n2\ttwo';
+  const marker = 'unrelated system prose';
+  const valid = lineNotice(POSIX_PATH);
+  const config = { inputMaxTokens: 10_000, toolResultMaxBytes: 2048 };
+  for (const [tool, messages, status, check] of [
+    ['Read', [`${valid}\n${marker}`], 'validated', /"source_total_lines":5/u],
+    ['Read', [`[Truncated: PARTIAL view — malformed]\n${marker}`], 'invalid', /does not match the 2\.1\.250 contract/u],
+    ['Read', [lineNotice('/other.txt')], 'invalid', /names a different path/u],
+    ['Read', [marker, valid], 'none', /"source_total_lines":null/u],
+    ['Grep', [valid], undefined, /^1\tone\n2\ttwo$/u],
+  ]) {
+    const body = requestWithToolResult(content, messages);
+    body.messages[0].content[0].name = tool;
+    const live = prepareCodexToolResult(body, { ...pendingRead(), tool }, config.toolResultMaxBytes);
+    assert.equal(live.rawToolResult.readNoticeStatus, status);
+    assert.match(live.limitedToolResult.text, check);
+    for (const mode of ['latest', 'transcript']) {
+      const text = replay(body, config, mode);
+      assert.ok(text.endsWith(`[tool_result ${CALL_ID}]\n${live.limitedToolResult.text}`), mode);
+      assert.ok(!text.includes(marker), mode);
+    }
+  }
+});
+
 test('final context budgeting re-pages a verified Read in both rebuild modes', () => {
   const lines = Array.from({ length: 12_000 }, (_, i) => `${i + 1}\tline-${i + 1} 水😀`);
   const body = requestWithToolResult(lines.join('\n'));

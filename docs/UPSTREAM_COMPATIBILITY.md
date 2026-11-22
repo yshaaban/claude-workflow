@@ -131,6 +131,15 @@ original request. One Codex turn can admit at most 256 dynamic calls.
 
 ## Verification
 
+To isolate a gateway failure before running the full CLI loop, start with the
+contract that owns the decision:
+
+| Symptom | What to check | Focused test |
+| --- | --- | --- |
+| Claude advertises the wrong context or rejects an effort | Resolve the model, profile and effort for the affected route. Two routes can use the same model at different efforts. | `node --test test/codex-capabilities.test.js` |
+| A rebuilt Read reports different source lines than the live call | Check the matching tool call, adjacent Claude notice and outgoing byte budget. A final transcript budget can shorten the page. | `node --test test/codex-read-paging.test.js` |
+| A tool result arrives after its Codex turn ended | Check the turn ID and whether Claude had already received the call. A retry warning is not a terminal error. | `node test/codex-provider-hardening.test.js` |
+
 Run `npm run test:upstream-compatibility` with both CLIs installed. It fails
 if either executable is missing. It checks actual tool advertisements on the
 model request, exercises Claude's coordinator and effort behavior, and runs a

@@ -10,7 +10,7 @@ import crypto from 'node:crypto';
 import process from 'node:process';
 
 import { envFlag, loadGatewayConfig } from './config.js';
-import { assertWorkflowRunnerModel, resolveCodexCapabilities } from './codex-capabilities.js';
+import { assertWorkflowRunnerModel, resolveConfiguredCodexCapabilities } from './codex-capabilities.js';
 import {
   ROUTE_ENTRY_REASONING_KEYS,
   ROUTE_ENTRY_UPSTREAM_MODEL_KEYS,
@@ -337,12 +337,8 @@ function assertTruthfulCustomModelId(
 }
 
 function codexCapabilitiesForRoute(config, route) {
-  return resolveCodexCapabilities({
-    command: config.codex.command,
-    cwd: config.codex.cwd,
+  return resolveConfiguredCodexCapabilities(config.codex, {
     model: routeUpstreamModel(route, config.codex.model),
-    contextProfile: config.codex.contextProfile,
-    requestedContextWindow: config.codex.requestedContextWindow,
     reasoningEffort: routeReasoningEffort(route, config.codex.reasoningEffort),
   });
 }
@@ -529,14 +525,7 @@ export function buildWorkflowGatewayConfig({
   const codexCapabilities =
     codexContextProfile === baseConfig.codex.capabilities?.profile
       ? baseConfig.codex.capabilities
-      : resolveCodexCapabilities({
-          command: baseConfig.codex.command,
-          cwd: baseConfig.codex.cwd,
-          model: baseConfig.codex.model,
-          contextProfile: codexContextProfile,
-          requestedContextWindow: baseConfig.codex.requestedContextWindow,
-          reasoningEffort: baseConfig.codex.reasoningEffort,
-        });
+      : resolveConfiguredCodexCapabilities(baseConfig.codex, { contextProfile: codexContextProfile });
   const codexToolResultMaxBytes = envString(
     'ULTRATHINK_GATEWAY_CODEX_TOOL_RESULT_MAX_BYTES'
   )
@@ -957,14 +946,7 @@ function routeContextContract(config, route) {
       const capabilities =
         model === config.codex.capabilities?.model
           ? config.codex.capabilities
-          : resolveCodexCapabilities({
-              command: config.codex.command,
-              cwd: config.codex.cwd,
-              model,
-              contextProfile: config.codex.contextProfile,
-              requestedContextWindow: config.codex.requestedContextWindow,
-              reasoningEffort: routeReasoningEffort(route, config.codex.reasoningEffort),
-            });
+          : codexCapabilitiesForRoute(config, route);
       return {
         usableContextTokens: capabilities.usableContextTokens,
         autoCompactTokens: capabilities.autoCompactTokens,

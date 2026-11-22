@@ -257,6 +257,24 @@ export function normalizeCodexContextProfile(value, fallback = 'standard') {
   throw new Error('ULTRATHINK_GATEWAY_CODEX_CONTEXT must be standard or long');
 }
 
+// A routed model and a proposed CLI selection use the gateway's discovery
+// settings. Pass only catalog inputs; the gateway config is not a child env.
+export function resolveConfiguredCodexCapabilities(codex, {
+  model = codex.model,
+  reasoningEffort = codex.reasoningEffort,
+  contextProfile = codex.contextProfile,
+  command = codex.command,
+} = {}) {
+  return resolveCodexCapabilities({
+    command,
+    cwd: codex.cwd,
+    requestedContextWindow: codex.requestedContextWindow,
+    model,
+    reasoningEffort,
+    contextProfile,
+  });
+}
+
 export function resolveCodexCapabilities({
   command = 'codex',
   cwd = process.cwd(),

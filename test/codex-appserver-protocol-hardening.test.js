@@ -5,7 +5,6 @@ import path from 'node:path';
 import test from 'node:test';
 
 import { CodexSessionManager } from '../js/gateway/codex-provider.js';
-import './codex-read-paging.test.js';
 
 const CLAUDE_MODEL = 'claude-sonnet-4-7';
 

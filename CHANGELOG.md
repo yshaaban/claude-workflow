@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.6.2 - 2026-11-22
+
+- Use the same Codex catalog settings when validating a route and when starting
+  it. Each route still checks its own reasoning effort.
+- Interpret Claude's partial Read notice the same way during a live tool call
+  and when rebuilding a transcript.
+- Decode Codex turn errors and completions in one place. A completion while a
+  tool is pending still prevents replay. No configuration or model changes.
+
 ## 0.6.1 - 2026-11-22
 
 - Preserve user corrections beside a tool result and send structured-output

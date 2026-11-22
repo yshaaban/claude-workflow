@@ -12,7 +12,7 @@ import {
   assertWorkflowRunnerModel,
   codexCatalogIssue,
   lookupCodexCatalogModel,
-  resolveCodexCapabilities,
+  resolveConfiguredCodexCapabilities,
 } from '../gateway/codex-capabilities.js';
 import {
   DEFAULT_CODEX_MODEL,
@@ -1168,12 +1168,8 @@ export function runConfigCommand(args, options = {}) {
       });
       const proposedAgentModel = selectedAgentModel || current.agents.model;
       const proposedEffort = String(parsed.effort || current.agents.effort).toLowerCase();
-      const proposedCapabilities = resolveCodexCapabilities({
-        command: gatewayConfig.codex.command,
-        cwd: gatewayConfig.codex.cwd,
+      const proposedCapabilities = resolveConfiguredCodexCapabilities(gatewayConfig.codex, {
         model: proposedAgentModel,
-        contextProfile: gatewayConfig.codex.contextProfile,
-        requestedContextWindow: gatewayConfig.codex.requestedContextWindow,
         reasoningEffort: proposedEffort,
       });
       if (proposedCapabilities.effortSupported === false) {

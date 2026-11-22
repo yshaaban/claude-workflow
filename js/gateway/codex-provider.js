@@ -8,7 +8,7 @@ import {
   codexImageUrl, toolResultContentError, estimateCodexRequestTokens, referenceText,
   rejectCodexDocumentAttachment, renderCodexImage, turnImages,
 } from './codex-content.js';
-import { resolveCodexCapabilities } from './codex-capabilities.js';
+import { resolveConfiguredCodexCapabilities } from './codex-capabilities.js';
 import { createCodexToolCatalog } from './codex-tool-catalog.js';
 import {
   codexOutputSchema, pendingUserSteer, rejectCodexCompaction, rejectInlineToolChanges,
@@ -245,6 +245,21 @@ function codexTurnGatewayError(turnError, fallbackMessage) {
       turnError?.additionalDetails ?? turnError?.additional_details ?? undefined,
     retryable: overloaded || rateLimited,
   });
+}
+
+// Error and completion notifications identify the same turn at different wire paths.
+function matchingTurnNotice(message, turnId) {
+  if (message.method === 'error' && message.params?.turnId === turnId) {
+    return {
+      kind: 'error', status: 'error', error: message.params.error,
+      willRetry: message.params.willRetry === true,
+    };
+  }
+  if (message.method === 'turn/completed' && message.params?.turn?.id === turnId) {
+    const { status, error } = message.params.turn;
+    return { kind: 'completion', status, error, willRetry: false };
+  }
+  return null;
 }
 
 function signalChildProcessTree(child, signal) {
@@ -1357,13 +1372,10 @@ function codexCapabilitiesForRoute(config, route = null) {
     return configured;
   }
 
-  return resolveCodexCapabilities({
-    command: config?.codex?.command || 'codex',
-    cwd: config?.codex?.cwd || process.cwd(),
+  return resolveConfiguredCodexCapabilities(config.codex, {
+    command: config.codex.command || 'codex',
     model,
-    contextProfile: config?.codex?.contextProfile || 'standard',
-    requestedContextWindow: config?.codex?.requestedContextWindow || 0,
-    reasoningEffort: route?.reasoningEffort || config?.codex?.reasoningEffort || '',
+    reasoningEffort: route?.reasoningEffort || config.codex.reasoningEffort || '',
   });
 }
 
@@ -1713,18 +1725,11 @@ function renderTranscriptBlock(block, options = {}) {
     const replayToolCall = options.toolCallsById?.get(block.tool_use_id);
     const header = `[tool_result ${block.tool_use_id || ''}${block.is_error ? ' error' : ''}]\n`;
     if (isReadToolName(replayToolCall?.tool) && !hasImage) {
-      const readNotice = adjacentClaudeReadPartialNotice(
+      const raw = withAdjacentReadNotice(
+        { text, isError: block.is_error === true, messageIndex: options.messageIndex },
         options.requestBody,
-        options.messageIndex,
         replayToolCall
       );
-      const raw = {
-        text,
-        isError: block.is_error === true,
-        readNoticeStatus: readNotice.status,
-        readPartialNotice: readNotice.notice,
-        readNoticeError: readNotice.error,
-      };
       const maxBytes = Math.min(options.readInlineMaxBytes ?? Infinity, budget);
       const pageAt = (bytes) => prepareCodexToolResultPayload(raw, replayToolCall, bytes).limitedToolResult;
       const page = pageAt(maxBytes);
@@ -2307,11 +2312,14 @@ function validateClaudeReadPartialNotice(notice, pendingToolCall) {
   return null;
 }
 
-function adjacentClaudeReadPartialNotice(requestBody, messageIndex, pendingToolCall) {
+function withAdjacentReadNotice(payload, requestBody, toolCall) {
+  if (!isReadToolName(toolCall?.tool)) return payload;
+  const attach = (readNoticeStatus, readPartialNotice = null, readNoticeError = null) =>
+    ({ ...payload, readNoticeStatus, readPartialNotice, readNoticeError });
   const messages = Array.isArray(requestBody?.messages) ? requestBody.messages : [];
-  const message = messages[messageIndex + 1];
+  const message = messages[payload.messageIndex + 1];
   if (message?.role !== 'system') {
-    return { status: 'none', notice: null, error: null };
+    return attach('none');
   }
 
   const content = typeof message.content === 'string'
@@ -2331,29 +2339,18 @@ function adjacentClaudeReadPartialNotice(requestBody, messageIndex, pendingToolC
     }
   }
   if (candidates.length === 0) {
-    return { status: 'none', notice: null, error: null };
+    return attach('none');
   }
   if (candidates.length !== 1) {
-    return {
-      status: 'invalid',
-      notice: null,
-      error: 'the immediately adjacent system message contains multiple Claude Read partial-view notices',
-    };
+    return attach('invalid', null, 'the immediately adjacent system message contains multiple Claude Read partial-view notices');
   }
 
   const notice = parseClaudeReadPartialNotice(candidates[0]);
   if (!notice) {
-    return {
-      status: 'invalid',
-      notice: null,
-      error: 'the immediately adjacent Claude Read partial-view notice does not match the 2.1.250 contract',
-    };
+    return attach('invalid', null, 'the immediately adjacent Claude Read partial-view notice does not match the 2.1.250 contract');
   }
-  const validationError = validateClaudeReadPartialNotice(notice, pendingToolCall);
-  if (validationError) {
-    return { status: 'invalid', notice: null, error: validationError };
-  }
-  return { status: 'validated', notice, error: null };
+  const error = validateClaudeReadPartialNotice(notice, toolCall);
+  return error ? attach('invalid', null, error) : attach('validated', notice);
 }
 
 function hasImageResult(content) {
@@ -2413,20 +2410,7 @@ function toolResultPayloadFromRequest(requestBody, callId) {
 function extractToolResultPayload(requestBody, pendingToolCall) {
   const payload = toolResultPayloadFromRequest(requestBody, pendingToolCall.callId);
   if (payload) {
-    if (!isReadToolName(pendingToolCall.tool)) {
-      return payload;
-    }
-    const readNotice = adjacentClaudeReadPartialNotice(
-      requestBody,
-      payload.messageIndex,
-      pendingToolCall
-    );
-    return {
-      ...payload,
-      readNoticeStatus: readNotice.status,
-      readPartialNotice: readNotice.notice,
-      readNoticeError: readNotice.error,
-    };
+    return withAdjacentReadNotice(payload, requestBody, pendingToolCall);
   }
 
   throw new GatewayError(
@@ -3443,23 +3427,20 @@ class CodexGatewaySession {
   captureInterBoundaryEvents(turnId, usageBaseline, tracer = null) {
     this.stopInterBoundaryCapture();
     const notification = (message) => {
-      const finalError = message.method === 'error' && message.params?.turnId === turnId &&
-        message.params.willRetry !== true;
-      const completed = message.method === 'turn/completed' && message.params?.turn?.id === turnId;
-      if (finalError || completed) {
+      const notice = matchingTurnNotice(message, turnId);
+      if (notice && !notice.willRetry) {
         const pending = this.pendingToolCall;
         if (pending && !pending.ended) {
           // Claude may already have executed the first tool. Keep its ID and
           // request fingerprint until the normal pending timeout: retries must
           // fail on this turn, not replay the tool or open a fresh thread.
           pending.ended = true;
-          const turnError = finalError ? message.params.error : message.params.turn.error;
-          this.fenceFailedToolTurn(turnError ? codexTurnGatewayError(turnError) :
+          this.fenceFailedToolTurn(notice.error ? codexTurnGatewayError(notice.error) :
             new GatewayError(400, 'invalid_request_error', 'The Codex turn ended while Claude was handling its tool call.'));
           const queued = this.queuedToolCalls.splice(0);
           traceLog(tracer || this.tracer, 'codex.tool_call.turn_ended', {
             turn_id: turnId, pending_call_id: pending.callId, discarded_calls: queued.length,
-            status: finalError ? 'error' : message.params.turn.status,
+            status: notice.status,
           });
           for (const id of [pending.requestId, ...queued.map(call => call.id)]) {
             this.connection.send({ id, error: { code: -32000, message: 'Codex turn already ended' } });
@@ -4094,20 +4075,31 @@ class CodexGatewaySession {
         return;
       }
 
-      if (message.method === 'error' && message.params?.turnId === turnId) {
-        const willRetry = message.params?.willRetry === true;
+      const notice = matchingTurnNotice(message, turnId);
+      if (notice?.kind === 'error') {
         const turnError = codexTurnGatewayError(
-          message.params?.error,
+          notice.error,
           'Codex app-server reported a turn error'
         );
         traceLog(tracer, 'codex.turn.error', {
           turn_id: turnId,
-          will_retry: willRetry,
+          will_retry: notice.willRetry,
           codex_error_type: turnError.codexErrorType || null,
           error_message: turnError.message,
         });
-        if (!willRetry) {
+        if (!notice.willRetry) {
           failBoundary(turnError);
+        }
+        return;
+      }
+
+      if (notice?.kind === 'completion') {
+        if (notice.status !== 'completed') {
+          failBoundary(codexTurnGatewayError(
+            notice.error, `Codex turn ended with status ${String(notice.status)}`
+          ));
+        } else {
+          completeBoundary({ type: 'final', text: refreshSelectedAgentText() });
         }
         return;
       }
@@ -4221,28 +4213,7 @@ class CodexGatewaySession {
           type: 'usage',
           usage: boundary.usage,
         });
-        return;
       }
-
-      if (message.method !== 'turn/completed' || message.params?.turn?.id !== turnId) {
-        return;
-      }
-
-      const turn = message.params.turn;
-      if (turn.status !== 'completed') {
-        failBoundary(
-          codexTurnGatewayError(
-            turn.error,
-            `Codex turn ended with status ${String(turn.status)}`
-          )
-        );
-        return;
-      }
-
-      completeBoundary({
-        type: 'final',
-        text: refreshSelectedAgentText(),
-      });
     };
 
     const onServerRequest = (message, fromQueue = false) => {

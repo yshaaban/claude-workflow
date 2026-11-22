@@ -466,6 +466,8 @@ rl.on('line', function onLine(line) {
     turnId = 'turn-' + process.pid;
     sendBatch([
       { id: message.id, result: { turn: { id: turnId } } },
+      { method: 'error', params: { turnId: 'other-turn', willRetry: false, error: { message: 'not our failure' } } },
+      { method: 'turn/completed', params: { turnId, turn: { id: 'other-turn', status: 'completed' } } },
       { method: 'rawResponse/completed', params: {
         threadId: 'thread-' + process.pid,
         turnId,
@@ -492,7 +494,6 @@ rl.on('line', function onLine(line) {
         tool: 'ext_tool_001',
         arguments: { command: 'printf parallel' }
       } });
-      log({ event: 'parallel_sent' });
       const terminal = ${JSON.stringify(terminal)};
       if (terminal) {
         if (terminal === 'error') {
@@ -506,8 +507,14 @@ rl.on('line', function onLine(line) {
           turnId, callId: 'after_end', tool: 'ext_tool_001', arguments: {}
         } });
       } else {
-        // A retryable warning in the same position does not end the turn.
-        send({ method: 'error', params: { turnId, willRetry: true, error: { message: 'reconnecting' } } });
+        sendBatch([
+          { method: 'error', params: { turnId: 'other-turn', willRetry: false, error: { message: 'not our failure' } } },
+          { method: 'turn/completed', params: { turnId, turn: { id: 'other-turn', status: 'completed' } } },
+          { method: 'error', params: { turnId, willRetry: true, error: { message: 'reconnecting' } } },
+          // The rejection of this unknown RPC acknowledges all three preceding
+          // notifications before the test sends a real tool result.
+          { id: 904, method: 'fixture/barrier', params: {} }
+        ]);
       }
     }, 25);
     return;
@@ -779,10 +786,10 @@ async function testToolBoundaryCompletesWithoutFixedDelay() {
       true,
       'canonical app-server threads must not request removed experimental raw events'
     );
-    await waitFor(async function parallelCallSent() {
+    await waitFor(async function pendingNotificationsHandled() {
       const entries = await readJsonLines(logPath);
-      return entries.some((entry) => entry.event === 'parallel_sent');
-    }, 'late parallel tool call after the first Claude boundary');
+      return entries.some((entry) => entry.event === 'rpc_rejected' && entry.id === 904);
+    }, 'parallel tool and non-terminal notifications after the first Claude boundary');
 
     const second = await manager.processRequest(
       request('immediate-tool'),
@@ -1383,7 +1390,7 @@ async function testTerminatedTurnDoesNotReplayTools() {
   const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'codex-terminal-tool-'));
   try {
     const tools = [{ name: 'Bash', input_schema: { type: 'object' } }];
-    for (const terminal of ['failed', 'interrupted', 'error']) {
+    for (const terminal of ['completed', 'failed', 'interrupted', 'error']) {
       const command = path.join(directory, 'fake-' + terminal);
       const log = path.join(directory, terminal + '.jsonl');
       await makeExecutable(command, immediateToolAppServer(log, terminal));

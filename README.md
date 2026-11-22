@@ -45,7 +45,7 @@ allowing Git dependencies throughout the dependency tree:
 
 ```bash
 npm install --global --allow-git=root \
-  git+https://github.com/yshaaban/claude-workflow.git#v0.6.1
+  git+https://github.com/yshaaban/claude-workflow.git#v0.6.2
 ```
 
 Use a user-owned npm prefix, nvm, Volta, or another Node version manager if a
@@ -659,7 +659,7 @@ Install the supported GitHub tag, verify the installed version, then run setup:
 
 ```bash
 npm install --global --allow-git=root \
-  git+https://github.com/yshaaban/claude-workflow.git#v0.6.1
+  git+https://github.com/yshaaban/claude-workflow.git#v0.6.2
 claude-workflow --version
 claude-workflow setup
 ```
