@@ -110,14 +110,14 @@ function normalizedToolOutputTruncationPolicy(value, fallback = null) {
 function parseCatalog(stdout) {
   const text = String(stdout || '').trim();
   if (!text) {
-    return [];
+    return null;
   }
 
   // `codex debug models` owns stdout and emits one JSON document. Parse that
   // document strictly so indentation is harmless but trailing diagnostics or
   // a second payload cannot be mistaken for trusted model metadata.
   const parsed = JSON.parse(text);
-  return Array.isArray(parsed?.models) ? parsed.models : [];
+  return Array.isArray(parsed?.models) ? parsed.models : null;
 }
 
 export function readCodexModelCatalog(command, cwd, env, bundledOnly) {
@@ -195,26 +195,43 @@ function normalizedCatalogModel(model) {
   };
 }
 
-function modelCapabilities(command, cwd, model, env) {
+export function lookupCodexCatalogModel(command, cwd, model, env) {
   // The installed binary's bundled catalog is deterministic and typically
   // loads in milliseconds. Only ask Codex to refresh its online catalog when
   // the selected model is absent, which keeps normal Claude startup off the
   // network while preserving support for remotely introduced models.
   const bundledCatalog = readCodexModelCatalog(command, cwd, env, true);
-  let catalogModel = bundledCatalog?.find((entry) => entry?.slug === model);
-  if (!catalogModel) {
-    const onlineCatalog = readCodexModelCatalog(command, cwd, env, false);
-    catalogModel = onlineCatalog?.find((entry) => entry?.slug === model);
+  const bundled = bundledCatalog?.find((entry) => entry?.slug === model);
+  if (bundled) return { status: 'present', entry: bundled, models: bundledCatalog };
+  const onlineCatalog = readCodexModelCatalog(command, cwd, env, false);
+  const online = onlineCatalog?.find((entry) => entry?.slug === model);
+  if (online) return { status: 'present', entry: online, models: onlineCatalog };
+  return {
+    status: bundledCatalog !== null && onlineCatalog !== null ? 'absent' : 'unverified',
+    entry: null, models: null,
+  };
+}
+
+export function codexCatalogIssue(status, model) {
+  if (status === 'present') return null;
+  if (status === 'absent') {
+    return `Neither Codex catalog lists ${model}. Check the model ID with codex debug models or select a different route.`;
   }
-  const discovered = normalizedCatalogModel(catalogModel);
+  return `Could not verify ${model} in the Codex catalog. Check codex debug models and retry.`;
+}
+
+function modelCapabilities(command, cwd, model, env) {
+  const { status: catalogStatus, entry } = lookupCodexCatalogModel(command, cwd, model, env);
+  const discovered = normalizedCatalogModel(entry);
   if (discovered) {
-    return { ...discovered, source: 'codex-catalog' };
+    return { ...discovered, catalogStatus, source: 'codex-catalog' };
   }
 
   const known = KNOWN_MODEL_CAPABILITIES.get(model);
   if (known) {
     return {
       ...known,
+      catalogStatus,
       reasoningEfforts: [...known.reasoningEfforts],
       toolOutputTruncationPolicy: { ...known.toolOutputTruncationPolicy },
       source: 'known-model',
@@ -222,6 +239,7 @@ function modelCapabilities(command, cwd, model, env) {
   }
 
   return {
+    catalogStatus,
     contextWindow: DEFAULT_RAW_CONTEXT_TOKENS,
     maxContextWindow: DEFAULT_MAX_RAW_CONTEXT_TOKENS,
     effectiveContextWindowPercent: DEFAULT_EFFECTIVE_CONTEXT_PERCENT,
@@ -271,15 +289,14 @@ export function resolveCodexCapabilities({
     )
   );
   const normalizedEffort = String(reasoningEffort || '').trim().toLowerCase();
-  const effortSupported =
-    !normalizedEffort ||
-    available.reasoningEfforts.length === 0 ||
-    available.reasoningEfforts.includes(normalizedEffort);
+  const effortSupported = !normalizedEffort ? true : available.reasoningEfforts.length
+    ? available.reasoningEfforts.includes(normalizedEffort) : null;
 
   return Object.freeze({
     model: normalizedModel,
     profile,
     source: available.source,
+    catalogStatus: available.catalogStatus,
     requestedRawContextTokens: requested,
     resolvedRawContextTokens,
     usableContextTokens,

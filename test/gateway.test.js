@@ -2178,8 +2178,8 @@ await runTest('Codex session manager forks unrelated side requests while a tool_
 
   const canonicalBody = {
     model: CODEX_REQUEST_MODEL,
+    system: 'Shared workflow instructions.',
     messages: [
-      { role: 'system', content: 'Shared workflow instructions.' },
       { role: 'user', content: 'Primary request.' },
     ],
     tools: [],
@@ -2191,8 +2191,8 @@ await runTest('Codex session manager forks unrelated side requests while a tool_
     req,
     {
       model: CODEX_REQUEST_MODEL,
+      system: 'Shared workflow instructions.',
       messages: [
-        { role: 'system', content: 'Shared workflow instructions.' },
         { role: 'user', content: 'A different in-session request arrived before the tool_result.' },
       ],
       tools: [],
@@ -2218,8 +2218,8 @@ await runTest('Codex session manager forks unrelated tool_result requests while 
     req,
     {
       model: CODEX_REQUEST_MODEL,
+      system: 'Shared workflow instructions.',
       messages: [
-        { role: 'system', content: 'Shared workflow instructions.' },
         { role: 'user', content: 'Primary request.' },
       ],
       tools: [],
@@ -2232,8 +2232,8 @@ await runTest('Codex session manager forks unrelated tool_result requests while 
     req,
     {
       model: CODEX_REQUEST_MODEL,
+      system: 'Shared workflow instructions.',
       messages: [
-        { role: 'system', content: 'Shared workflow instructions.' },
         {
           role: 'assistant',
           content: [{ type: 'tool_use', id: 'call_other', name: 'Read', input: {} }],
@@ -5854,108 +5854,38 @@ await runTest(
 );
 
 await runTest(
-  'Codex autocompact-thrash final text recovers as context overflow',
-  async function testCodexAutocompactThrashTextRecovery() {
-    const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'ultrathink-codex-thrash-retry-'));
-    const codexPath = path.join(tempDir, 'codex-thrash-retry');
-    const turnParamsPath = path.join(tempDir, 'turn-params.jsonl');
-    const failureMarkerPath = path.join(tempDir, 'failed-once');
-
+  'successful Codex answers mentioning compaction or context limits are never retried',
+  async function testCodexSuccessfulAnswerIsNotAnError() {
+    const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'ultrathink-codex-successful-answer-'));
+    const command = path.join(tempDir, 'codex-successful-answer');
+    const callsPath = path.join(tempDir, 'calls');
+    const answer = 'Autocompact is thrashing: a tool output is likely too large for the context window. This is a quotation.';
+    const manager = new CodexSessionManager({
+      requestTimeoutMs: 5_000, codex: { command, cwd: tempDir, idleTimeoutMs: 0 },
+    });
     try {
-      await makeExecutable(
-        codexPath,
-        '#!/usr/bin/env node\n' +
-          "import fs from 'node:fs';\n" +
-          "import readline from 'node:readline';\n" +
-          'const rl = readline.createInterface({ input: process.stdin });\n' +
-          'function send(message) { process.stdout.write(`${JSON.stringify(message)}\\n`); }\n' +
-          "rl.on('line', function onLine(line) {\n" +
-          '  const message = JSON.parse(line);\n' +
-          "  if (message.method === 'initialize') {\n" +
-          '    send({ id: message.id, result: { protocolVersion: 2 } });\n' +
-          '    return;\n' +
-          '  }\n' +
-          "  if (message.method === 'thread/start') {\n" +
-          "    send({ id: message.id, result: { thread: { id: `thread-${message.id}` } } });\n" +
-          '    return;\n' +
-          '  }\n' +
-          "  if (message.method === 'turn/start') {\n" +
-          '    const turnId = `turn-${message.id}`;\n' +
-          '    fs.appendFileSync(process.env.ULTRATHINK_TEST_CODEX_TURN_PARAMS, `${JSON.stringify(message.params)}\\n`, "utf8");\n' +
-          '    send({ id: message.id, result: { turn: { id: turnId } } });\n' +
-          '    if (!fs.existsSync(process.env.ULTRATHINK_TEST_CODEX_FAIL_MARKER)) {\n' +
-          '      fs.writeFileSync(process.env.ULTRATHINK_TEST_CODEX_FAIL_MARKER, "1", "utf8");\n' +
-          '      setTimeout(function emitThrashOutcome() {\n' +
-          "        send({ method: 'item/completed', params: { turnId, item: { id: 'agent-thrash', type: 'agentMessage', text: 'Autocompact is thrashing: the context refilled to the limit within 3 turns of the previous compact, 3 times in a row. A file being read or a tool output is likely too large for the context window.' } } });\n" +
-          "        send({ method: 'turn/completed', params: { turn: { id: turnId, status: 'completed' } } });\n" +
-          '      }, 10);\n' +
-          '    } else {\n' +
-          '      setTimeout(function completeTurn() {\n' +
-          "        send({ method: 'item/completed', params: { turnId, item: { id: 'agent-ok', type: 'agentMessage', text: 'recovered after compact thrash' } } });\n" +
-          "        send({ method: 'turn/completed', params: { turn: { id: turnId, status: 'completed' } } });\n" +
-          '      }, 10);\n' +
-          '    }\n' +
-          '  }\n' +
-          '});\n'
-      );
-
-      const previousTurnParams = process.env.ULTRATHINK_TEST_CODEX_TURN_PARAMS;
-      const previousFailMarker = process.env.ULTRATHINK_TEST_CODEX_FAIL_MARKER;
-      process.env.ULTRATHINK_TEST_CODEX_TURN_PARAMS = turnParamsPath;
-      process.env.ULTRATHINK_TEST_CODEX_FAIL_MARKER = failureMarkerPath;
-      let manager = null;
-      try {
-        manager = new CodexSessionManager({
-          requestTimeoutMs: 5_000,
-          codex: {
-            command: codexPath,
-            cwd: tempDir,
-            idleTimeoutMs: 0,
-            inputMaxTokens: 10_000,
-          },
-        });
-
-        const outcome = await manager.processRequest(
-          claudeSessionRequest('session-thrash-retry'),
-          {
-            model: CODEX_REQUEST_MODEL,
-            messages: [
-              { role: 'user', content: 'Old context that should be omitted after thrash.' },
-              { role: 'assistant', content: 'Old answer that should be omitted after thrash.' },
-              { role: 'user', content: 'Current request after autocompact thrash.' },
-            ],
-            tools: [],
-          },
-          codexRoute()
-        );
-
-        assert.equal(outcome.type, 'final');
-        assert.equal(outcome.text, 'recovered after compact thrash');
-
-        const turnParams = (await fs.readFile(turnParamsPath, 'utf8'))
-          .trim()
-          .split(/\n/u)
-          .map(function parseLine(line) {
-            return JSON.parse(line);
-          });
-        assert.equal(turnParams.length, 2);
-        assert.equal(turnParams[1].input[0].text.includes('Current request after autocompact thrash.'), true);
-        assert.equal(turnParams[1].input[0].text.includes('Old context'), false);
-        ok('autocompact-thrash assistant outcomes recover through the context-overflow path');
-      } finally {
-        await manager?.close();
-        if (previousTurnParams === undefined) {
-          delete process.env.ULTRATHINK_TEST_CODEX_TURN_PARAMS;
-        } else {
-          process.env.ULTRATHINK_TEST_CODEX_TURN_PARAMS = previousTurnParams;
-        }
-        if (previousFailMarker === undefined) {
-          delete process.env.ULTRATHINK_TEST_CODEX_FAIL_MARKER;
-        } else {
-          process.env.ULTRATHINK_TEST_CODEX_FAIL_MARKER = previousFailMarker;
-        }
-      }
+      await makeExecutable(command, `#!/usr/bin/env node
+const fs = require('node:fs');
+const send = (m) => process.stdout.write(JSON.stringify(m) + '\\n');
+require('node:readline').createInterface({input:process.stdin}).on('line', line => {
+  const m = JSON.parse(line);
+  if (m.method === 'initialize') send({id:m.id, result:{}});
+  if (m.method === 'thread/start') send({id:m.id, result:{thread:{id:'thread'}}});
+  if (m.method === 'turn/start') {
+    fs.appendFileSync(${JSON.stringify(callsPath)}, 'turn\\n');
+    send({id:m.id,result:{turn:{id:'turn'}}});
+    send({method:'item/completed',params:{turnId:'turn',item:{id:'answer',type:'agentMessage',text:${JSON.stringify(answer)}}}});
+    send({method:'turn/completed',params:{turn:{id:'turn',status:'completed',error:null}}});
+  }
+});
+`);
+      const result = await manager.processRequest(claudeSessionRequest('successful-answer'), {
+        model: CODEX_REQUEST_MODEL, messages: [{ role: 'user', content: 'Explain the old log message.' }],
+      }, codexRoute());
+      assert.equal(result.text, answer);
+      assert.equal(await fs.readFile(callsPath, 'utf8'), 'turn\n');
     } finally {
+      await manager.close();
       await fs.rm(tempDir, { recursive: true, force: true });
     }
   }

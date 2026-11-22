@@ -10,6 +10,8 @@ import { unsafeWslInstallPaths } from '../../scripts/validate-local-install.mjs'
 import {
   CODEX_MODEL_ALIASES,
   assertWorkflowRunnerModel,
+  codexCatalogIssue,
+  lookupCodexCatalogModel,
   resolveCodexCapabilities,
 } from '../gateway/codex-capabilities.js';
 import {
@@ -528,7 +530,7 @@ export function configurationPath(env = process.env) {
   return path.join(path.resolve(home), CONFIG_FILE_NAME);
 }
 
-export function effectiveConfigurationSummary(env = process.env) {
+export function effectiveConfigurationSummary(env = process.env, workflow) {
   return withProcessEnvironment(env, function summarizeEffectiveConfiguration() {
     const {
       config,
@@ -537,7 +539,7 @@ export function effectiveConfigurationSummary(env = process.env) {
       subagentModelId,
       subagentRoute,
       subagentCapabilities,
-    } = buildWorkflowGatewayConfig();
+    } = workflow ?? buildWorkflowGatewayConfig();
     const mainRoute = resolveModelRoute(mainModelId, config);
     resolveModelRoute(rawSubagentModelId, config);
     if (subagentModelId !== rawSubagentModelId) {
@@ -578,6 +580,10 @@ export function effectiveConfigurationSummary(env = process.env) {
         model: mainModelId,
         provider: routeProvider(mainRoute),
         target: routeTargetSummary(mainRoute),
+        ...(mainRoute.provider === 'codex' && {
+          upstreamModel: mainRoute.upstreamModel,
+          catalogStatus: lookupCodexCatalogModel(config.codex.command, config.codex.cwd, mainRoute.upstreamModel, env).status,
+        }),
       },
       agents: {
         name: friendlyAgentName(agentModel),
@@ -587,6 +593,10 @@ export function effectiveConfigurationSummary(env = process.env) {
         effort,
         context: subagentCapabilities?.profile || null,
         contextTokens: subagentCapabilities?.usableContextTokens || null,
+        ...(subagentCapabilities && {
+          catalogStatus: subagentCapabilities.catalogStatus,
+          contextSource: subagentCapabilities.source,
+        }),
       },
       permissions: envFlag(
         'CLAUDE_WORKFLOW_SKIP_PERMISSIONS',
@@ -605,7 +615,8 @@ function configurationLines(summary) {
     `Main          ${summary.main.name} -> ${summary.main.provider} (${summary.main.model})`,
     `Agents        ${summary.agents.name} -> ${summary.agents.provider} (${summary.agents.model})`,
     `Reasoning     ${summary.agents.effort}`,
-    `Context       ${summary.agents.context} (${summary.agents.contextTokens} usable tokens)`,
+    `Context       ${summary.agents.context} (${summary.agents.contextTokens} usable tokens)` +
+      (summary.agents.contextSource && summary.agents.contextSource !== 'codex-catalog' ? ' [fallback estimate]' : ''),
     `Permissions   ${summary.permissions}`,
   ];
 }
@@ -1165,7 +1176,7 @@ export function runConfigCommand(args, options = {}) {
         requestedContextWindow: gatewayConfig.codex.requestedContextWindow,
         reasoningEffort: proposedEffort,
       });
-      if (!proposedCapabilities.effortSupported) {
+      if (proposedCapabilities.effortSupported === false) {
         throw new Error(
           `${proposedAgentModel} does not support Codex reasoning effort ${proposedEffort}; ` +
             `choose one of ${proposedCapabilities.reasoningEfforts.join(', ')}`
@@ -1243,11 +1254,20 @@ function diagnosticReport(options = {}) {
   return withProcessEnvironment(env, function buildDiagnosticReport() {
     let routeCheck;
     let summary = null;
+    let codexCommand = 'codex';
     try {
-      summary = effectiveConfigurationSummary(process.env);
+      const workflow = buildWorkflowGatewayConfig();
+      const { config } = workflow;
+      codexCommand = config.codex.command;
+      summary = effectiveConfigurationSummary(process.env, workflow);
+      const issues = [...new Set([summary.main, summary.agents]
+        .filter(route => route.provider === 'codex')
+        .map(route => codexCatalogIssue(route.catalogStatus, route.upstreamModel || route.model))
+        .filter(Boolean))];
       routeCheck = {
-        ok: true,
+        ok: issues.length === 0,
         label: `Routing ${summary.main.name} main; ${summary.agents.name}/${summary.agents.effort} agents`,
+        ...(issues.length ? { detail: issues.join(' ') } : {}),
       };
     } catch (error) {
       routeCheck = {
@@ -1257,13 +1277,6 @@ function diagnosticReport(options = {}) {
       };
     }
 
-    let codexCommand = 'codex';
-    try {
-      codexCommand = buildWorkflowGatewayConfig().config.codex.command;
-    } catch {
-      // The routing check above reports invalid configuration. Use the default
-      // command so the remaining diagnostics still provide useful information.
-    }
     const run = options.run || commandResult;
     const checks = [
       checkWorkflowPlatform(env, codexCommand, options.cwd || process.cwd()),

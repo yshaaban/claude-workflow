@@ -2,7 +2,7 @@ import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 
-import { readCodexModelCatalog } from './codex-capabilities.js';
+import { codexCatalogIssue, lookupCodexCatalogModel } from './codex-capabilities.js';
 import { GatewayError } from './model-routing.js';
 
 async function verifyPrivateStorage(target, mode) {
@@ -28,15 +28,12 @@ export async function createCodexToolCatalog({ command, cwd, model, env = proces
     throw new GatewayError(502, 'api_error', 'Codex catalog TMPDIR must be an absolute path');
   }
   const requiredModel = String(model || '').trim();
-  let models = readCodexModelCatalog(command, cwd, env, true);
-  if (!models?.some((entry) => entry?.slug === requiredModel)) {
-    models = readCodexModelCatalog(command, cwd, env, false);
-  }
-  if (!requiredModel || !models?.some((entry) => entry?.slug === requiredModel)) {
+  const { models, status } = lookupCodexCatalogModel(command, cwd, requiredModel, env);
+  if (!requiredModel || status !== 'present') {
     throw new GatewayError(
       502,
       'api_error',
-      `cannot isolate Codex tools without an installed model catalog containing ${requiredModel || 'the routed model'}; update Codex and restart claude-workflow-gateway`
+      `cannot isolate Codex tools: ${codexCatalogIssue(status, requiredModel || 'the routed model')}`
     );
   }
 

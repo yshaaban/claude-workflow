@@ -45,7 +45,7 @@ allowing Git dependencies throughout the dependency tree:
 
 ```bash
 npm install --global --allow-git=root \
-  git+https://github.com/yshaaban/claude-workflow.git#v0.6.0
+  git+https://github.com/yshaaban/claude-workflow.git#v0.6.1
 ```
 
 Use a user-owned npm prefix, nvm, Volta, or another Node version manager if a
@@ -367,8 +367,9 @@ is not an OS-user security boundary; see
 [Security boundaries](#security-boundaries).
 
 Codex sessions use the installed app-server protocol and keep one process alive
-across genuine continuations. Cancellation uses `turn/interrupt`; failed or
-unacknowledged interruption evicts the process before reuse. Admission pressure
+across genuine continuations. Cancellation interrupts the turn and releases
+its thread subscription. If cleanup cannot be confirmed, the gateway retires
+the process before reuse. Admission pressure
 returns a retryable overload response rather than growing the session pool
 without bound, and in-progress turns are never replayed after partial output.
 
@@ -396,7 +397,8 @@ Claude Code, a tool result, the HTTP transport, and the provider each have
 independent limits. Claude Workflow correlates Claude Code's partial `Read`
 notice with the matching pending call, then gives Codex only a verified
 contiguous prefix of numbered source lines plus an exact next offset. It never
-presents a head-and-tail preview as complete source.
+presents a head-and-tail preview as complete source. A page that reaches EOF
+is not evidence that earlier lines were read.
 
 The Codex CLI 0.171.0 bundled catalog declares a 10,000-token function-output policy.
 The Read guard stays below that history threshold with a page no larger than
@@ -605,8 +607,10 @@ claude-workflow config
 - **Claude shows an old model or context:** close the session, run
   `claude-workflow config`, and start a new one. Run
   `claude-workflow-gateway reconcile` if you use shared mode.
-- **Codex setup fails:** update to Codex CLI 0.171.0 or newer, run `codex login`,
-  then rerun `claude-workflow setup`.
+- **Codex setup fails:** run `claude-workflow doctor`. If the model is absent
+  from the catalog, check its spelling against `codex debug models` and update
+  the route. If the catalog could not be checked, verify the Codex installation
+  and login, then retry. Catalog presence alone does not prove account access.
 - **A large review is incomplete:** follow the bounded coverage process in
   `docs/LARGE_FILES_AND_DIFFS.md`; do not infer the contents of a truncated gap.
 - **WSL path validation fails:** move the checkout, home, npm cache/prefix, and
@@ -655,7 +659,7 @@ Install the supported GitHub tag, verify the installed version, then run setup:
 
 ```bash
 npm install --global --allow-git=root \
-  git+https://github.com/yshaaban/claude-workflow.git#v0.6.0
+  git+https://github.com/yshaaban/claude-workflow.git#v0.6.1
 claude-workflow --version
 claude-workflow setup
 ```

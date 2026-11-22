@@ -5,7 +5,8 @@ import test from 'node:test';
 
 import { loadGatewayConfig } from '../js/gateway/config.js';
 import { translateAnthropicMessagesRequest } from '../js/gateway/anthropic-format.js';
-import { createGatewayServer } from '../js/gateway/server.js';
+import { GatewayError } from '../js/gateway/model-routing.js';
+import { createGatewayApp, createGatewayServer } from '../js/gateway/server.js';
 
 const REQUEST_BODY_LIMIT_BYTES = 32 * 1024 * 1024;
 const GATEWAY_SECRET = 'gateway-test-secret';
@@ -477,6 +478,7 @@ test('Fable 5.1 forced-tool errors and refusals stay upstream decisions without 
       'content-type': 'application/json',
       'request-id': 'req_fable_error',
       'retry-after': '9',
+      'x-should-retry': body.tool_choice?.type === 'any' ? 'true' : 'false',
       'anthropic-ratelimit-requests-remaining': '7',
     });
     response.end(JSON.stringify(forced ? errorBody : refusalBody));
@@ -503,6 +505,7 @@ test('Fable 5.1 forced-tool errors and refusals stay upstream decisions without 
       assert.match(response.headers['content-type'], /^application\/json/u);
       assert.equal(response.headers['request-id'], 'req_fable_error');
       assert.equal(response.headers['retry-after'], '9');
+      assert.equal(response.headers['x-should-retry'], toolChoice.type === 'any' ? 'true' : 'false');
       assert.equal(response.headers['anthropic-ratelimit-requests-remaining'], '7');
       assert.deepEqual(captured.at(-1), body, 'forced tool use must not be silently weakened to auto');
     }
@@ -883,6 +886,57 @@ test('gateway accepts 32 MiB JSON and returns an Anthropic 413 above the limit',
   });
   assert.equal(malformed.status, 400);
   assert.equal((await malformed.json()).error.type, 'invalid_request_error');
+});
+
+test('a terminal Codex failure after tool delivery forbids automatic HTTP retry', async (t) => {
+  const config = loadGatewayConfig();
+  config.sharedSecret = GATEWAY_SECRET;
+  config.anthropicPassthroughModels = [];
+  config.exposedModels = ['runner'];
+  config.routeMap = { runner: { provider: 'codex', model: 'gpt-6.2-astra' } };
+  const fail = async () => {
+    throw Object.assign(new GatewayError(429, 'rate_limit_error', 'Verify the pending tool effect.'), { retryable: false });
+  };
+  const server = http.createServer(createGatewayApp(config, { processRequest: fail, streamRequest: fail }));
+  const address = await listen(server);
+  t.after(() => closeServer(server));
+  for (const stream of [true, false]) {
+    const response = await rawPost(`http://127.0.0.1:${address.port}/v1/messages`, gatewayHeaders(), JSON.stringify({
+      model: 'runner', stream, messages: [{ role: 'user', content: 'continue' }], max_tokens: 10,
+    }));
+    assert.equal(response.status, 429);
+    assert.equal(response.headers['x-should-retry'], 'false');
+    assert.equal(JSON.parse(response.body).error.type, 'rate_limit_error');
+  }
+});
+
+test('native SSE keeps names and data in one event with LF, split CRLF, or CR across heartbeats', async (t) => {
+  const upstream = http.createServer(async (req, res) => {
+    const end = JSON.parse((await readBody(req)).toString()).metadata.newline;
+    res.writeHead(200, { 'content-type': 'text/event-stream' });
+    res.write('event: message_stop' + end[0]);
+    // Force a heartbeat with a partial frame buffered, including between CR and LF.
+    setTimeout(() => {
+      res.write(end.slice(1));
+      setTimeout(() => res.end('data: {"type":"message_stop"}' + end + end), 35);
+    }, 35);
+  });
+  const address = await listen(upstream);
+  t.after(() => closeServer(upstream));
+  const gateway = await startGateway(`http://127.0.0.1:${address.port}/`, { sseKeepaliveIntervalMs: 5 });
+  t.after(() => gateway.runtime.close());
+  for (const newline of ['\r\n', '\r', '\n']) {
+    const { status, body } = await rawPost(gateway.url + '/v1/messages', gatewayHeaders(), JSON.stringify({
+      model: TEST_MODEL, stream: true, max_tokens: 10, metadata: { newline },
+      messages: [{ role: 'user', content: 'done?' }],
+    }));
+    assert.equal(status, 200);
+    const frames = body.toString().replace(/\r\n|\r/gu, '\n').split('\n\n').filter(Boolean);
+    assert.ok(frames.some((frame) => frame.startsWith('event: ping\n')));
+    assert.deepEqual(frames.filter((frame) => !frame.startsWith('event: ping\n')), [
+      'event: message_stop\ndata: {"type":"message_stop"}',
+    ]);
+  }
 });
 
 test('proxied SSE keepalives stay between frames and never enter JSON errors', async function (t) {

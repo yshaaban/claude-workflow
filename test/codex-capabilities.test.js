@@ -232,10 +232,13 @@ test('unknown model fallback retains Codex conservative byte policy metadata', (
   const capability = resolveCodexCapabilities({
     command: '/definitely/missing/codex',
     model: 'future-unknown-model',
+    reasoningEffort: 'ultra',
     env: {},
   });
 
   assert.equal(capability.source, 'conservative-fallback');
+  assert.equal(capability.catalogStatus, 'unverified');
+  assert.equal(capability.effortSupported, null);
   assert.deepEqual(capability.toolOutputTruncationPolicy, {
     mode: 'bytes',
     limit: 10_000,

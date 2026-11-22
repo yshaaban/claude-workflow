@@ -14,6 +14,7 @@ import {
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const CONTRACT_FILES = Object.freeze([
   'test/codex-appserver-installed-contract.test.js',
+  'test/codex-conversation-semantics.test.js',
   'test/installed-codex-tool-loop.test.js',
   'test/installed-claude-codex.test.js',
   'test/installed-claude-deepseek.test.js',

@@ -353,7 +353,7 @@ function validateEffectiveCodexRoutes(config) {
       continue;
     }
     const capabilities = codexCapabilitiesForRoute(config, route);
-    if (capabilities.effortSupported) {
+    if (capabilities.effortSupported !== false) {
       continue;
     }
     const effort = routeReasoningEffort(route, config.codex.reasoningEffort);

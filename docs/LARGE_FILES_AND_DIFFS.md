@@ -65,7 +65,11 @@ Claude Workflow applies the following rules:
 3. Read arguments retain Claude Code's 1-based source-line semantics. A verified
    result carries its contiguous covered range and exact next offset. The
    gateway never advances beyond the last numbered source line it actually
-   forwarded.
+   forwarded. `reached_eof: true` means this page reached the last line.
+   `source_complete: true` means this page contains **every** line, from line
+   1 through EOF. Reading just the tail does not establish whole-file coverage.
+   If a rebuilt thread has less space, its coverage describes the shorter
+   page it actually receives, not the original tool response.
 4. Claude's adjacent partial-view notice remains transient. It does not become
    a persistent Codex developer instruction or change thread identity. If a
    thread must be rebuilt after eviction or recovery, historical Read results

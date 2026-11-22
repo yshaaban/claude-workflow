@@ -68,6 +68,7 @@ require('node:readline').createInterface({ input: process.stdin }).on('line', (l
     send({ id: message.id, result: {} });
     send({ method: 'turn/completed', params: { threadId: 'thread', turn: { id: 'turn', status: 'interrupted' } } });
   }
+  if (message.method === 'thread/unsubscribe') send({ id: message.id, result: { status: 'unsubscribed' } });
 });
 `, { mode: 0o755 });
   await fs.chmod(command, 0o755);

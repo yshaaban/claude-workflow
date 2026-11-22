@@ -101,6 +101,34 @@ a new session when changing model families. Ordinary delegated agents use the
 configured Codex model. Native forks and skill agents that explicitly inherit
 the main model follow Claude's own rules.
 
+### Continuation, retries, and output contracts
+
+A user correction beside a tool result is user input, not output from that
+tool. The Codex adapter keeps these roles separate. It passes a requested
+JSON output schema to the Codex turn. A format change while a tool is pending
+requires a new turn.
+
+Codex cannot replay Anthropic's signed compaction blocks or change its
+tool registry halfway through a turn. The gateway rejects these requests
+instead of silently dropping context or advertising withdrawn tools. For
+an ordinary mid-conversation system reminder, Claude Code can retry with the
+reminder in user content. Native Anthropic routes pass these messages through.
+
+A client can retry a rate limit before any tool was handed to Claude. After
+tool delivery, a terminal error (including overflow or a lost connection)
+does not trigger a model retry. Check what the tool did before starting a
+different request. The gateway does not treat successful answer text as an
+overflow error.
+
+Within the same Claude session/agent identity, delayed duplicate requests and
+tool results are rejected even after the failed Codex process has been replaced.
+This is a bounded, in-memory safeguard, not an exactly-once guarantee: it
+retains only request and call-ID digests and error status/type, for up to
+30 minutes, 1,024 keys per identity and 256 identities. Restarting the
+gateway clears it; reaching a limit evicts the oldest entries. After a
+restart or long delay, inspect the actual effect rather than resending the
+original request. One Codex turn can admit at most 256 dynamic calls.
+
 ## Verification
 
 Run `npm run test:upstream-compatibility` with both CLIs installed. It fails

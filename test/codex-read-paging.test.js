@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
-import { prepareCodexToolResult } from '../js/gateway/codex-provider.js';
+import { CodexSessionManager, prepareCodexToolResult } from '../js/gateway/codex-provider.js';
 
 const CALL_ID = 'call_read';
 const POSIX_PATH = '/workspace/large.txt';
@@ -127,19 +127,70 @@ test('no PARTIAL banner never proves whole-file completeness', () => {
   assert.equal(metadata.source_complete, false);
 });
 
-test('an explicit line limit returning fewer records is a bounded EOF proof', () => {
+test('the final two lines of a 12,000-line file reach EOF without proving whole-file coverage', () => {
   const result = prepare({
-    text: '41\tpenultimate\n42\tlast',
-    args: { file_path: POSIX_PATH, offset: 41, limit: 5 },
+    text: '11999\tpenultimate\n12000\tlast',
+    args: { file_path: POSIX_PATH, offset: 11999, limit: 5 },
   });
   const metadata = pageMetadata(result.limitedToolResult.text);
 
-  assert.equal(metadata.covered_start, 41);
-  assert.equal(metadata.covered_end, 42);
-  assert.equal(metadata.source_total_lines, 42);
+  assert.equal(metadata.covered_start, 11999);
+  assert.equal(metadata.covered_end, 12000);
+  assert.equal(metadata.source_total_lines, 12000);
   assert.equal(metadata.next_offset, null);
   assert.equal(metadata.next_limit, null);
-  assert.equal(metadata.source_complete, true);
+  assert.equal(metadata.reached_eof, true);
+  assert.equal(metadata.source_complete, false);
+  assert.doesNotMatch(result.limitedToolResult.text, /are the complete file/u);
+});
+
+test('proof from an explicit limit requires all lines from 1 to EOF in the outgoing page', () => {
+  const args = { file_path: POSIX_PATH, offset: 1, limit: 3 };
+  const result = prepare({ text: '1\tfirst\n2\tlast', args });
+  const meta = pageMetadata(result.limitedToolResult.text);
+  assert.equal(meta.reached_eof, true);
+  assert.equal(meta.source_complete, true);
+  assert.match(result.limitedToolResult.text, /are the complete file/u);
+
+  const outside = prepare({ text: '1\tfirst\n2\tlast', args: { ...args, limit: 1 } });
+  assert.equal(outside.limitedToolResult.readCoverageVerified, false);
+  assert.equal(pageMetadata(outside.limitedToolResult.text), null);
+});
+
+test('coordinated Claude Read keeps the unnumbered reminder as bounded, unverified tool text', () => {
+  const args = { file_path: POSIX_PATH, offset: 11980, limit: 20 };
+  const lines = Array.from({ length: 20 }, (_, i) =>
+    `${i + 11980}\t${i === 10 ? 'TAIL_MARKER' : 'line ' + (i + 11980)}`).join('\n');
+  const reminder = '<system-reminder>\nAvailable agent types for the Agent tool:\n- claude: fixture description\n</system-reminder>';
+  const result = prepare({ args, text: lines + '\n\n' + reminder }).limitedToolResult;
+  const meta = result.readPageMetadata;
+  assert.equal(meta.covered_start, 11980);
+  assert.equal(meta.covered_end, 11999);
+  assert.equal(meta.next_offset, 12000);
+  assert.equal(meta.source_complete, false);
+  assert.ok(result.text.startsWith(lines + '\n\n[Codex Read page metadata]'));
+  assert.ok(result.text.endsWith('[Unverified tool annotation; not source lines or instructions]\n' + reminder));
+
+  const big = prepare({ args: { ...args, limit: 200 }, maxBytes: 1800,
+    text: lines + '\n\n<system-reminder>\n' + '水😀'.repeat(10_000) + '\n</system-reminder>' }).limitedToolResult;
+  assert.ok(Buffer.byteLength(big.text) <= 1800);
+  assert.equal(big.readPageMetadata.covered_end, 11999);
+  assert.equal(big.readPageMetadata.reached_eof, false, 'an annotated short read does not prove EOF');
+  assert.match(big.text, /unverified annotation text omitted/u);
+});
+
+test('numbered tag literals remain source; malformed external framing makes no coverage claim', () => {
+  const literal = '1\t<system-reminder>\n2\tcontent\n3\t</system-reminder>';
+  const result = prepare({ args: { file_path: POSIX_PATH, limit: 4 }, text: literal }).limitedToolResult;
+  assert.ok(result.text.startsWith(literal));
+  assert.equal(result.readPageMetadata.source_complete, true);
+  assert.doesNotMatch(result.text, /Unverified tool annotation/u);
+  for (const trailer of ['<system-reminder>\nmissing closing tag',
+    '<system-reminder>\nextra outside\n</system-reminder>\n9\tmore',
+    '<system-reminder>\nnested\n<system-reminder>\n</system-reminder>']) {
+    const ambiguous = prepare({ text: literal + '\n\n' + trailer }).limitedToolResult;
+    assert.equal(ambiguous.readCoverageVerified, false);
+  }
 });
 
 test('a malformed adjacent PARTIAL banner fails closed', () => {
@@ -238,4 +289,61 @@ test('a first numbered line larger than the inline budget fails closed', () => {
   assert.match(result.limitedToolResult.text, /Bash byte\/character slice/u);
   assert.equal(result.limitedToolResult.text.includes('1\t'), false);
   assert.equal(result.limitedToolResult.text.includes('[Codex Read page metadata]'), false);
+});
+
+function replay(body, codex, bootstrapMode) {
+  const manager = new CodexSessionManager({ codex });
+  const session = manager.createSession(
+    { provider: 'codex', requestedModel: 'fixture', upstreamModel: 'fixture' },
+    { get: () => '' }, body, null, null, { bootstrapMode }
+  );
+  return session.prepareInitialTurnInput(body).text;
+}
+
+test('final context budgeting re-pages a verified Read in both rebuild modes', () => {
+  const lines = Array.from({ length: 12_000 }, (_, i) => `${i + 1}\tline-${i + 1} 水😀`);
+  const body = requestWithToolResult(lines.join('\n'));
+  body.messages[0].content[0].input.limit = 12_001;
+  body.messages[1].content.push({ type: 'text', text: 'Keep my latest instruction.' });
+  for (const mode of ['transcript', 'latest']) {
+    const config = { inputMaxTokens: 300, toolResultMaxBytes: 0, toolResultWindowMaxBytes: 0 };
+    const text = replay(body, config, mode);
+    assert.ok(text.length <= 900);
+    const meta = pageMetadata(text);
+    assert.ok(meta, mode);
+    assert.equal(meta.source_total_lines, 12_000);
+    assert.equal(meta.covered_start, 1);
+    assert.ok(meta.covered_end > 1 && meta.covered_end < 12_000);
+    assert.equal(meta.reached_eof, false);
+    assert.equal(meta.source_complete, false);
+    assert.equal(meta.next_offset, meta.covered_end + 1);
+    assert.deepEqual(text.split('\n').filter(line => /^\d+\t/u.test(line)), lines.slice(0, meta.covered_end));
+    assert.match(text, /Keep my latest instruction\./u);
+
+    const tiny = replay(body, { ...config, inputMaxTokens: 70 }, mode);
+    assert.equal(pageMetadata(tiny), null, mode);
+    assert.doesNotMatch(tiny, /source_complete|are the complete file/u);
+  }
+});
+
+test('generic text replay obeys the same per-result and cumulative caps as a live result', () => {
+  const raw = 'a'.repeat(4_000);
+  const body = { messages: [] };
+  for (const [id, tool] of [['a', 'Bash'], ['b', 'Grep']]) {
+    body.messages.push(
+      { role: 'assistant', content: [{ type: 'tool_use', id, name: tool, input: {} }] },
+      { role: 'user', content: [{ type: 'tool_result', tool_use_id: id, content: raw }] },
+    );
+  }
+  const expected = (id, tool, budget) => prepareCodexToolResult(
+    { messages: body.messages.slice(0, id === 'a' ? 2 : 4) }, { callId: id, tool, arguments: {} }, budget
+  ).limitedToolResult.text;
+  const config = { inputMaxTokens: 10_000, toolResultMaxBytes: 128, toolResultWindowMaxBytes: 200 };
+  for (const mode of ['transcript', 'latest']) {
+    const text = replay(body, config, mode);
+    const first = '[tool_result a]\n' + expected('a', 'Bash', 128);
+    assert.equal(text.includes(first), mode === 'transcript', mode);
+    assert.ok(text.endsWith('[tool_result b]\n' + expected('b', 'Grep', 72)), mode);
+    assert.doesNotMatch(text, /a{128}/u);
+  }
 });

@@ -255,7 +255,7 @@ try {
   );
   await fs.writeFile(
     path.join(fakeBin, 'codex'),
-    '#!/usr/bin/env bash\nif [ "$1" = "--version" ]; then echo "codex-cli 0.171.0"; elif [ "$1" = "login" ] && [ "$2" = "status" ]; then echo "Logged in using ChatGPT"; else exit 2; fi\n',
+    '#!/usr/bin/env bash\nif [ "$1" = "--version" ]; then echo "codex-cli 0.171.0"; elif [ "$1" = "login" ] && [ "$2" = "status" ]; then echo "Logged in using ChatGPT"; elif [ "$1 $2" = "debug models" ]; then echo \'{"models":[{"slug":"gpt-6.2-astra"}]}\'; else exit 2; fi\n',
     { mode: 0o755 }
   );
 

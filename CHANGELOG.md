@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.6.1 - 2026-11-22
+
+- Preserve user corrections beside a tool result and send structured-output
+  schemas to the Codex turn. Unsupported inline tool changes and signed
+  compaction requests fail explicitly; Claude can retry ordinary reminders
+  without the unsupported system role.
+- Report Read coverage after the final context budget is applied, including
+  after a thread rebuild. Reading the last page no longer marks the entire
+  file as read. Generic tool results respect configured replay byte limits.
+- Distinguish provider errors from successful model prose. A pre-tool rate
+  limit permits a fresh client retry. Release interrupted Codex subscriptions
+  before process reuse.
+- Preserve native SSE event boundaries and upstream retry directives. Setup
+  and doctor check model catalog presence for the effective Codex routes.
+
 ## 0.6.0 - 2026-11-22
 
 - Astra is the supported GPT-6.2 runner. If you used Sol for agents, run

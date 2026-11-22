@@ -389,6 +389,90 @@ test(
   }
 );
 
+test('installed Codex releases interrupted threads across repeated cancellations on a warm connection',
+  { skip: CODEX_SKIP, timeout: 25_000 }, async (t) => {
+    const cwd = await fs.mkdtemp(path.join(os.tmpdir(), 'codex-installed-cancel-'));
+    const stateDir = path.join(cwd, 'codex-state');
+    const previousHome = process.env.CODEX_HOME;
+    const previousKey = process.env.CODEX_CANCEL_PROBE_KEY;
+    let onModelRequest;
+    const server = createServer((request, response) => {
+      const chunks = [];
+      request.on('data', chunk => chunks.push(chunk));
+      request.on('end', () => {
+        if (request.method !== 'POST' || !request.url?.endsWith('/responses')) {
+          response.writeHead(404); response.end(); return;
+        }
+        const body = decodeRequestBody(chunks, request.headers['content-encoding']).toString('utf8');
+        response.writeHead(200, { 'content-type': 'text/event-stream' });
+        response.write(': held by local cancellation probe\n\n');
+        onModelRequest?.(body);
+      });
+    });
+    let manager;
+    t.after(async () => {
+      await manager?.close();
+      await closeHttpServer(server);
+      if (previousHome === undefined) delete process.env.CODEX_HOME;
+      else process.env.CODEX_HOME = previousHome;
+      if (previousKey === undefined) delete process.env.CODEX_CANCEL_PROBE_KEY;
+      else process.env.CODEX_CANCEL_PROBE_KEY = previousKey;
+      await fs.rm(cwd, { recursive: true, force: true, maxRetries: 3 });
+    });
+    await fs.mkdir(stateDir, { mode: 0o700 });
+    await new Promise((resolve, reject) => {
+      server.once('error', reject);
+      server.listen(0, '127.0.0.1', resolve);
+    });
+    // No hosted credentials or inference. A zero unload delay allows the
+    // released runtime's own loaded-thread inventory to verify reclamation.
+    await fs.writeFile(path.join(stateDir, 'config.toml'), [
+      'model_provider = "cancel_probe"', 'thread_unload_delay_secs = 0',
+      '[model_providers.cancel_probe]', 'name = "Local cancellation probe"',
+      `base_url = "http://127.0.0.1:${server.address().port}/v1"`,
+      'wire_api = "responses"', 'supports_websockets = false', 'env_key = "CODEX_CANCEL_PROBE_KEY"',
+    ].join('\n'), { mode: 0o600 });
+    process.env.CODEX_HOME = stateDir;
+    process.env.CODEX_CANCEL_PROBE_KEY = 'loopback-only';
+    manager = new CodexSessionManager({
+      requestTimeoutMs: 5_000, codex: {
+        command: CODEX_COMMAND, cwd, idleTimeoutMs: 0, closeKillTimeoutMs: 300, maxSessions: 1,
+      },
+    });
+    async function until(check, label) {
+      const deadline = Date.now() + 5_000;
+      while (Date.now() < deadline) {
+        if (await check()) return;
+        await new Promise(resolve => setTimeout(resolve, 20));
+      }
+      assert.fail(`timed out waiting for ${label}`);
+    }
+    let connection;
+    for (let i = 0; i < 3; i++) {
+      const abort = new AbortController();
+      const prompt = `hold local turn ${i}`;
+      const received = new Promise(resolve => {
+        onModelRequest = payload => { if (payload.includes(prompt)) resolve(); };
+      });
+      const req = { get: name => name === 'x-claude-code-session-id' ? 'cancel-probe' : '', abortSignal: abort.signal };
+      const rejected = assert.rejects(manager.processRequest(req, {
+        model: 'cancel-probe', messages: [{ role: 'user', content: prompt }],
+      }, { requestedModel: 'cancel-probe', upstreamModel: DEFAULT_CODEX_MODEL,
+        approvalPolicy: 'never', sandbox: 'read-only' }), error => error.status === 499);
+      // turn/start can acknowledge enqueueing before its core task is
+      // interruptible. Observe this exact turn executing on the local provider.
+      await withTimeout(received, 5_000, 'the local provider to receive this turn');
+      const session = [...manager.sessions.values()][0];
+      connection ??= session.connection;
+      assert.equal(session.connection, connection);
+      abort.abort();
+      await rejected;
+      assert.equal(manager.sessions.size, 1, 'a clean unsubscribe should keep the process warm');
+      await until(async () => (await connection.request('thread/loaded/list', {})).data.length === 0,
+        'the interrupted thread to leave the loaded inventory');
+    }
+  });
+
 const isolatedCases = ['gpt-6.2-astra', 'gpt-6.2-sol'].flatMap((model) =>
   ['main', 'subagent'].map((threadKind) => ({ model, threadKind })));
 for (const { model, threadKind } of isolatedCases) test(

@@ -119,6 +119,10 @@ async function installFakeNativeTools(root) {
       '#!/usr/bin/env bash',
       'if [ -n "${FAKE_NATIVE_ENV_FILE:-}" ]; then printf \'codex:%s|%s|%s|%s|%s|%s|%s\\n\' "$*" "${ULTRATHINK_GATEWAY_KIMI_API_KEY+x}" "${KIMI_API_KEY+x}" "${ULTRATHINK_GATEWAY_QWEN_API_KEY+x}" "${QWEN_API_KEY+x}" "${BAILIAN_TOKEN_PLAN_API_KEY+x}" "${DASHSCOPE_API_KEY+x}" >> "$FAKE_NATIVE_ENV_FILE"; fi',
       'if [ "${1:-}" = "--version" ]; then echo "codex-cli ${FAKE_CODEX_VERSION:-0.171.0}"; exit 0; fi',
+      'if [ "${1:-} ${2:-}" = "debug models" ]; then',
+      '  if [ "${FAKE_CATALOG_OFFLINE:-}" = 1 ]; then exit 1; fi',
+      '  echo \'{"models":[{"slug":"gpt-6.2-astra"},{"slug":"gpt-6.1-terra"}]}\'; exit 0',
+      'fi',
       'if [ "${1:-}" = "login" ] && [ "${2:-}" = "status" ]; then',
       '  if [ "${FAKE_CODEX_LOGGED_OUT:-}" = "1" ]; then echo "Not logged in"; exit 1; fi',
       '  if [ "${FAKE_CODEX_KEY_CONFIGURED:-}" = "1" ]; then echo "API key configured - example-key-hint" >&2; echo "Authentication is checked when you send a request." >&2; exit 0; fi',
@@ -131,6 +135,32 @@ async function installFakeNativeTools(root) {
   );
   return bin;
 }
+
+test('doctor distinguishes catalog absence from lookup failure without blocking offline configuration', { skip: process.platform === 'win32' }, async (t) => {
+  const home = await temporaryDirectory(t, 'workflow-doctor-model-');
+  const bin = await installFakeNativeTools(home);
+  const env = isolatedEnvironment(home, { PATH: `${bin}${path.delimiter}${process.env.PATH}` });
+  const saved = runCli(['config', '--agents', 'gpt-6.1-terraa', '--effort', 'medium'], { env });
+  assert.equal(saved.status, 0, saved.stderr);
+  for (const [extra, reason] of [[{}, /Neither Codex catalog lists gpt-6\.1-terraa/u],
+    [{ FAKE_CATALOG_OFFLINE: '1' }, /Could not verify gpt-6\.1-terraa/u]]) {
+    const result = runCli(['doctor', '--json'], { env: { ...env, ...extra } });
+    assert.notEqual(result.status, 0);
+    const report = JSON.parse(result.stdout);
+    assert.equal(report.ok, false);
+    assert.match(report.checks.find((check) => check.label.startsWith('Routing')).detail, reason);
+  }
+  const repaired = runCli(['config', '--main', 'opus', '--agents', 'astra', '--effort', 'medium'], { env });
+  assert.equal(repaired.status, 0, repaired.stderr);
+  assert.equal(runCli(['doctor', '--json'], { env }).status, 0);
+  // Also check an independent direct main; a healthy runner cannot make it ready.
+  const direct = runCli(['doctor', '--json'], { env: { ...env,
+    ULTRATHINK_GATEWAY_MAIN_MODEL_ID: 'codex', ULTRATHINK_GATEWAY_MAIN_PROVIDER: 'codex',
+    ULTRATHINK_GATEWAY_ANTHROPIC_PASSTHROUGH_MODELS: 'none',
+    ULTRATHINK_GATEWAY_MAIN_UPSTREAM_MODEL: 'gpt-unknown-test' } });
+  assert.notEqual(direct.status, 0);
+  assert.match(direct.stdout, /Neither Codex catalog lists gpt-unknown-test/u);
+});
 
 test('DeepSeek preset selects V4.1 Flash, keeps agent defaults, and needs no Claude login', async (t) => {
   const root = await temporaryDirectory(t, 'workflow-deepseek-config-');
@@ -502,7 +532,7 @@ test(
     await fsp.mkdir(home);
     await fsp.mkdir(bin);
     await fsp.symlink(process.execPath, path.join(bin, 'claude'));
-    await fsp.symlink(process.execPath, path.join(bin, 'codex'));
+    await fsp.writeFile(path.join(bin, 'codex'), `#!${process.execPath}\nconsole.log('{"models":[{"slug":"gpt-6.2-astra"}]}');\n`, { mode: 0o755 });
     const actions = [];
 
     runSetupCommand([], {

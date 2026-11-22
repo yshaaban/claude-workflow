@@ -274,7 +274,7 @@ export function loadGatewayConfig() {
     requestedContextWindow: codexRequestedContextWindow,
     reasoningEffort: codexReasoningEffort,
   });
-  if (!codexCapabilities.effortSupported) {
+  if (codexCapabilities.effortSupported === false) {
     throw new Error(
       `${codexModel} does not support Codex reasoning effort ${codexReasoningEffort}; ` +
         `choose one of ${codexCapabilities.reasoningEfforts.join(', ')}`

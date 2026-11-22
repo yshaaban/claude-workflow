@@ -242,13 +242,14 @@ setInterval(function keepAlive() {}, 1000);
 `;
 }
 
-function typedTurnErrorAppServer(logPath, errorType, errorViaNotification) {
+function typedTurnErrorAppServer(logPath, errorType, errorViaNotification, mode = 'always') {
   return `#!/usr/bin/env node
 const fs = require('node:fs');
 const readline = require('node:readline');
 const logPath = ${JSON.stringify(logPath)};
 const errorType = ${JSON.stringify(errorType)};
 const errorViaNotification = ${JSON.stringify(errorViaNotification)};
+const mode = ${JSON.stringify(mode)};
 function log(value) { fs.appendFileSync(logPath, JSON.stringify(value) + '\\n'); }
 function send(value) { process.stdout.write(JSON.stringify(value) + '\\n'); }
 function sendBatch(values) {
@@ -268,8 +269,34 @@ rl.on('line', function onLine(line) {
     send({ id: message.id, result: { thread: { id: threadId } } });
     return;
   }
-  if (message.method === 'turn/start') {
-    log({ event: 'turn_start' });
+  if (message.method === 'turn/start' || ([901, 902].includes(message.id) && message.result)) {
+    if (message.method === 'turn/start') {
+      const hadTurn = fs.readFileSync(logPath, 'utf8').includes('"event":"turn_start"');
+      log({ event: 'turn_start', input: message.params.input });
+      if (hadTurn && mode !== 'always') {
+        sendBatch([
+          { id: message.id, result: { turn: { id: turnId } } },
+          { method: 'item/completed', params: { threadId, turnId,
+            item: { id: 'answer', type: 'agentMessage', text: 'Recovered.' } } },
+          { method: 'turn/completed', params: { threadId, turn: { id: turnId, status: 'completed' } } }
+        ]);
+        return;
+      }
+      send({ id: message.id, result: { turn: { id: turnId } } });
+      if (mode === 'after_tool' || mode === 'after_parallel') {
+        send({ id: 901, method: 'item/tool/call', params: {
+          threadId, turnId, callId: 'once', tool: 'ext_tool_001', arguments: {}
+        } });
+        if (mode === 'after_parallel') send({ id: 902, method: 'item/tool/call', params: {
+          threadId, turnId, callId: 'twice', tool: 'ext_tool_001', arguments: {}
+        } });
+        return;
+      }
+    } else {
+      log({ event: 'tool_result' });
+      if (mode === 'after_parallel' && message.id === 901) return;
+      if (errorType === 'transport_exit') process.exit(2);
+    }
     const errorMessages = {
       serverOverloaded: 'typed overload',
       rateLimitExceeded: 'typed rate limit',
@@ -281,7 +308,6 @@ rl.on('line', function onLine(line) {
       additionalDetails: 'typed-details'
     };
     const events = [
-      { id: message.id, result: { turn: { id: turnId } } },
       { method: 'thread/tokenUsage/updated', params: {
         threadId, turnId, tokenUsage: {
           last: { inputTokens: 10, outputTokens: 1, totalTokens: 11 }
@@ -406,6 +432,10 @@ rl.on('line', function onLine(line) {
       { id: message.id, result: {} }
     ]);
   }
+  if (message.method === 'thread/unsubscribe') {
+    log({ event: 'unsubscribe', pid: process.pid, message });
+    send({ id: message.id, result: { status: 'unsubscribed' } });
+  }
 });
 setInterval(function keepAlive() {}, 1000);
 `;
@@ -515,7 +545,18 @@ rl.on('line', function onLine(line) {
         id: message.id,
         error: { code: -32603, message: 'interrupt rejected by fake server' }
       });
+    } else if (mode.startsWith('unsubscribe')) {
+      sendBatch([
+        { id: message.id, result: {} },
+        { method: 'turn/completed', params: { threadId: activeThreadId,
+          turn: { id: activeTurnId, status: 'interrupted', error: null } } },
+      ]);
     }
+  }
+  if (message.method === 'thread/unsubscribe') {
+    log({ event: 'unsubscribe', pid: process.pid, message });
+    if (mode === 'unsubscribe_rejected') send({ id: message.id, error: { code: -32603, message: 'cannot release' } });
+    else send({ id: message.id, result: { status: 'unknown-status' } });
   }
 });
 setInterval(function keepAlive() {}, 1000);
@@ -652,7 +693,7 @@ test('typed rateLimitExceeded maps to retryable 429 without replay', async () =>
   const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'codex-typed-rate-limit-'));
   const command = path.join(tempDir, 'fake-codex');
   const logPath = path.join(tempDir, 'events.jsonl');
-  await makeExecutable(command, typedTurnErrorAppServer(logPath, 'rateLimitExceeded', true));
+  await makeExecutable(command, typedTurnErrorAppServer(logPath, 'rateLimitExceeded', true, 'once'));
   const manager = new CodexSessionManager(managerConfig(command, tempDir));
 
   try {
@@ -670,10 +711,94 @@ test('typed rateLimitExceeded maps to retryable 429 without replay', async () =>
     );
     const entries = await readJsonLines(logPath);
     assert.equal(entries.filter((entry) => entry.event === 'turn_start').length, 1);
+    const retried = await manager.processRequest(request('typed-rate-limit'), body('Typed rate limit.'), route());
+    assert.equal(retried.text, 'Recovered.');
+    const afterRetry = await readJsonLines(logPath);
+    assert.deepEqual(afterRetry.map(entry => entry.event), ['thread_start', 'turn_start', 'thread_start', 'turn_start']);
+    assert.deepEqual(afterRetry[3].input, afterRetry[1].input);
   } finally {
     await manager.close();
     await fs.rm(tempDir, { recursive: true, force: true });
   }
+});
+
+for (const [errorType, status, mode] of [
+  ['rateLimitExceeded', 429, 'after_tool'], ['contextWindowExceeded', 400, 'after_parallel'],
+  ['serverOverloaded', 503, 'after_tool'], ['transport_exit', 502, 'after_tool'],
+]) test(`post-tool ${errorType} cannot replay after unrelated work or pool eviction`, async (t) => {
+  const cwd = await fs.mkdtemp(path.join(os.tmpdir(), 'codex-post-tool-limit-'));
+  const command = path.join(cwd, 'fake-codex');
+  const log = path.join(cwd, 'events');
+  await makeExecutable(command, typedTurnErrorAppServer(log, errorType, false, mode));
+  const manager = new CodexSessionManager(managerConfig(command, cwd));
+  t.after(async () => { await manager.close(); await fs.rm(cwd, { recursive: true, force: true }); });
+
+  const req = request('post-tool-limit');
+  const original = { ...body('Record the marker.'), tools: [
+    { name: 'Record', description: 'Record one marker.', input_schema: { type: 'object' } },
+  ] };
+  const first = await manager.processRequest(req, original, route());
+  assert.equal(first.type, 'tool_use');
+  function resultBody(previous, { id, name, input }) {
+    return { ...original, messages: [...previous.messages,
+    { role: 'assistant', content: [{ type: 'tool_use', id, name, input }] },
+    { role: 'user', content: [{ type: 'tool_result', tool_use_id: id, content: 'recorded marker' }] },
+    ] };
+  }
+  const firstResult = resultBody(original, first.toolCall);
+  let continuation = firstResult;
+  if (mode === 'after_parallel') {
+    const queued = await manager.processRequest(req, firstResult, route());
+    assert.equal(queued.toolCall.id, 'twice');
+    continuation = resultBody(firstResult, queued.toolCall);
+  }
+  const blocked = candidate =>
+    assert.rejects(manager.processRequest(req, candidate, route()), error => {
+      assert.equal(error.status, status);
+      assert.equal(error.retryable, false);
+      assert.match(error.message, /check its effects/iu);
+      return true;
+    });
+  for (const candidate of [continuation, original, firstResult]) await blocked(candidate);
+  const before = (await readJsonLines(log)).map(e => e.event);
+  assert.deepEqual(before, ['thread_start', 'turn_start', 'tool_result', ...(mode === 'after_parallel' ? ['tool_result'] : [])]);
+  const corrected = { ...original, messages: [...continuation.messages,
+    { role: 'user', content: 'I checked the marker; just summarize.' },
+  ] };
+  assert.equal((await manager.processRequest(req, corrected, route())).text, 'Recovered.');
+  const events = await readJsonLines(log);
+  assert.equal(events.filter(e => e.event === 'thread_start').length, 2);
+  assert.match(events.at(-1).input[0].text, /recorded marker/u);
+  for (const candidate of [original, firstResult, continuation]) await blocked(candidate);
+  const altered = structuredClone(continuation);
+  altered.messages.at(-1).content[0].content += ' (late duplicate with changed content)';
+  await blocked(altered);
+  assert.equal((await readJsonLines(log)).length, events.length);
+  assert.equal((await manager.processRequest(request('different-identity'), original, route())).text, 'Recovered.');
+});
+
+test('post-tool replay protection expires, is bounded per identity, and retains no payload', (t) => {
+  let now = 1_000_000;
+  t.mock.method(Date, 'now', () => now);
+  const cache = new CodexSessionManager({ codex: {} }).failedToolTurns;
+  const failure = { status: 503, type: 'overloaded_error', message: 'private provider payload' };
+  cache.remember('one', ['first'], ['private tool identifier'], failure);
+  cache.rejectReplay('two', 'first', []);
+  const blocked = () => cache.rejectReplay('one', 'different', ['private tool identifier']);
+  assert.throws(blocked, error => error.status === 503 && error.retryable === false &&
+    !error.message.includes('private'));
+  const snapshot = JSON.stringify([...cache.identities.get('one')]);
+  assert.doesNotMatch(snapshot, /private|provider payload/u);
+  now += 29 * 60_000;
+  cache.remember('one', ['first'], ['private tool identifier'], { status: 504, type: 'api_error' });
+  assert.throws(blocked, error => error.status === 503);
+  now += 60_000;
+  assert.doesNotThrow(blocked);
+  cache.remember('one', Array.from({ length: 1025 }, (_, i) => String(i)), [], failure);
+  assert.doesNotThrow(() => cache.rejectReplay('one', '0', []));
+  assert.throws(() => cache.rejectReplay('one', '1', []));
+  for (let i = 0; i < 256; i++) cache.remember(`other-${i}`, ['first'], [], failure);
+  assert.doesNotThrow(() => cache.rejectReplay('one', '1', []));
 });
 
 test('typed usageLimitExceeded maps to non-retryable 429 without replay', async () => {
@@ -802,6 +927,8 @@ test('graceful turn interruption reuses the process and replays into a fresh thr
       threadId: 'thread-1',
       turnId: 'turn-1',
     });
+    assert.deepEqual(entries.filter(e => e.event === 'unsubscribe').map(e => e.message.params),
+      [{ threadId: 'thread-1' }]);
 
     const turnStarts = entries.filter((entry) => entry.event === 'turn_start');
     assert.equal(turnStarts[1].threadId, 'thread-2');
@@ -815,7 +942,7 @@ test('graceful turn interruption reuses the process and replays into a fresh thr
   }
 });
 
-for (const interruptMode of ['reject', 'timeout']) {
+for (const interruptMode of ['reject', 'timeout', 'unsubscribe_rejected', 'unsubscribe_unknown']) {
   test(`failed ${interruptMode} interruption evicts the process before authoritative replay`, async () => {
     const tempDir = await fs.mkdtemp(
       path.join(os.tmpdir(), `codex-interrupt-${interruptMode}-`)

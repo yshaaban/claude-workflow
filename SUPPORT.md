@@ -37,6 +37,11 @@ default `gpt-6.2-astra` route is absent, run
 your Codex workspace. The interactive Codex `/model` picker shows available
 choices.
 
+Setup and doctor check both the configured Codex main (when selected) and
+the runner. They distinguish a model missing from the catalogs from a catalog
+they could not read. You can still save or repair configuration offline.
+Neither check sends a model request or verifies hosted entitlement.
+
 For GPT-6.2 runners, select Astra. If a saved Sol runner pin prevents startup,
 run `claude-workflow config --agents astra --effort low` or choose `medium`.
 For a custom route map or exported environment override, change the effective

@@ -408,6 +408,7 @@ function copyUpstreamResponseHeaders(upstream, res, options = {}) {
     'request-id',
     'retry-after',
     'x-request-id',
+    'x-should-retry',
   ]);
   if (options.preserveContentType) {
     exactHeaders.add('content-type');
@@ -818,21 +819,12 @@ function configuredSseKeepaliveIntervalMs(config) {
   return DEFAULT_SSE_KEEPALIVE_INTERVAL_MS;
 }
 
-function nextSseFrame(buffer) {
-  const boundary = /(?:\r\n|\r|\n){2}/u.exec(buffer);
-  if (!boundary) {
-    return null;
-  }
-
-  const end = boundary.index + boundary[0].length;
-  return {
-    frame: buffer.slice(0, end),
-    rest: buffer.slice(end),
-  };
-}
-
 async function relaySseWithKeepalive(body, res, signal, keepaliveIntervalMs) {
   const decoder = new TextDecoder();
+  // CRLF is one line ending, even across network chunks. A trailing CR
+  // cannot be classified until the next byte or EOF; never insert a ping
+  // inside an upstream frame. Keep the unmatched suffix for the next scan.
+  const frameEnd = /(?:\r\n|\r(?!\n|$)|\n){2}/gu;
   let buffered = '';
   let closed = false;
   let heartbeatPending = false;
@@ -890,13 +882,14 @@ async function relaySseWithKeepalive(body, res, signal, keepaliveIntervalMs) {
   signal?.addEventListener('abort', stopHeartbeatOnAbort, { once: true });
   try {
     for await (const chunk of body) {
+      frameEnd.lastIndex = Math.max(0, buffered.length - 3);
       buffered += decoder.decode(chunk, { stream: true });
-      let frame = nextSseFrame(buffered);
-      while (frame) {
-        buffered = frame.rest;
-        await queueWrite(frame.frame);
-        frame = nextSseFrame(buffered);
+      let emitted = 0;
+      while (frameEnd.exec(buffered)) {
+        await queueWrite(buffered.slice(emitted, frameEnd.lastIndex));
+        emitted = frameEnd.lastIndex;
       }
+      if (emitted) buffered = buffered.slice(emitted);
     }
 
     buffered += decoder.decode();
@@ -2108,6 +2101,7 @@ export function createGatewayApp(config = loadGatewayConfig(), codexSessions = n
 
         const formatted = formatAnthropicError(error);
         if (!res.headersSent) {
+          if (error.retryable === false) res.setHeader('x-should-retry', 'false');
           res.status(formatted.status).json(formatted.body);
           return;
         }

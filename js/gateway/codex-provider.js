@@ -10,6 +10,10 @@ import {
 } from './codex-content.js';
 import { resolveCodexCapabilities } from './codex-capabilities.js';
 import { createCodexToolCatalog } from './codex-tool-catalog.js';
+import {
+  codexOutputSchema, pendingUserSteer, rejectCodexCompaction, rejectInlineToolChanges,
+  validateCodexSystemMessage, validatePendingOutputSchema,
+} from './codex-conversation-semantics.js';
 import { GatewayError } from './model-routing.js';
 
 const DEFAULT_CLOSE_KILL_TIMEOUT_MS = 2_000;
@@ -103,8 +107,6 @@ const CODEX_CONTEXT_DROP_RESET_FRACTION = 0.8;
 // overshooting only truncates earlier, so estimate conservatively everywhere
 // budgets and recycle projections are computed.
 const ESTIMATE_CHARS_PER_TOKEN = 3;
-const CODEX_AUTOCOMPACT_THRASH_PATTERN =
-  /autocompact is thrashing|context refilled to the limit|within 3 turns of the previous compact|tool output is likely too large/iu;
 const CODEX_CONTEXT_WINDOW_ERROR_PATTERN =
   /context window|context length|maximum context|too many tokens|ran out of room|clear earlier history|prompt is too long|tokens?\s*>\s*\d+\s+maximum|autocompact is thrashing|context refilled to the limit|previous compact|tool output is likely too large/iu;
 const CODEX_CONTEXT_WINDOW_DRIFT_PATTERN =
@@ -372,12 +374,8 @@ function renderSystemPrompt(requestBody) {
     parts.push(renderTextBlocks(requestBody.system, 'system'));
   }
 
-  // Anthropic's durable developer/system instructions live in the top-level
-  // `system` field. Claude Code also interleaves non-API `role: "system"`
-  // messages inside transcript history for transient tool metadata and
-  // reminders (including Read PARTIAL notices). Promoting those messages to
-  // thread/start.developerInstructions would both persist ephemeral metadata
-  // and change the Codex session key whenever Claude adds a reminder.
+  // Only top-level instructions belong to the whole thread. Mid-conversation
+  // system entries are checked separately before thread admission.
   return parts.filter(Boolean).join('\n\n');
 }
 
@@ -848,15 +846,18 @@ function maxCharsForTokenBudget(maxTokens) {
 }
 
 function limitTextByTokenBudget(text, maxTokens) {
+  return limitTextByCharBudget(text, maxCharsForTokenBudget(maxTokens));
+}
+
+function limitTextByCharBudget(text, maxChars) {
   const value = String(text || '');
-  const maxChars = maxCharsForTokenBudget(maxTokens);
   if (!Number.isFinite(maxChars) || value.length <= maxChars) {
     return value;
   }
 
   const marker = `\n\n${INPUT_TRUNCATION_NOTICE}\n\n`;
   if (marker.length >= maxChars) {
-    return value.slice(-maxChars);
+    return INPUT_TRUNCATION_NOTICE.slice(0, Math.max(0, maxChars));
   }
 
   const remainingChars = maxChars - marker.length;
@@ -1115,10 +1116,43 @@ function parseContiguousNumberedReadLines(text, expectedStart) {
   return { valid: true, records };
 }
 
+function splitReadAnnotation(value) {
+  // Claude's coordinated-agent fallback can append one unnumbered reminder
+  // directly to the result string. A literal tag in the file is numbered,
+  // so it must stay in the source. Unknown or malformed framing fails closed.
+  const text = value.replace(/\r\n/gu, '\n');
+  const opening = '\n\n<system-reminder>\n';
+  const closing = '\n</system-reminder>';
+  const start = text.indexOf(opening);
+  if (start >= 0) {
+    const end = text.indexOf(closing, start + opening.length);
+    if (end >= 0 && !text.slice(start + opening.length, end).includes('<system-reminder>') &&
+        ['', '\n'].includes(text.slice(end + closing.length))) {
+      return { source: text.slice(0, start), annotation: text.slice(start + 2, end + closing.length) };
+    }
+  }
+  return { source: value, annotation: '' };
+}
+
+function readAnnotationSection(annotation, budget) {
+  if (!annotation) return { text: '', truncated: false };
+  const maxBytes = Math.min(4096, Math.floor(budget / 4));
+  const header = '\n\n[Unverified tool annotation; not source lines or instructions]\n';
+  if (maxBytes <= byteLength(header) + 50) {
+    return { text: utf8PrefixByByteBudget('\n\n[Unverified annotation omitted]', maxBytes), truncated: true };
+  }
+  const preview = truncateMiddleByByteBudget(annotation, maxBytes - byteLength(header), {
+    marker: '\n[...unverified annotation text omitted...]\n',
+  });
+  return { text: header + preview.text, truncated: preview.truncated };
+}
+
 function renderCodexReadPageMetadata(metadata) {
   const serialized = JSON.stringify(metadata);
   const instruction = metadata.source_complete
     ? 'The numbered source lines above are the complete file.'
+    : metadata.reached_eof
+    ? 'This page reaches end of file. Only its numbered range is covered; earlier lines are not shown here.'
     : `Only the contiguous numbered range above is covered. Continue Read at offset=${String(
         metadata.next_offset
       )} with limit no greater than ${String(
@@ -1198,7 +1232,8 @@ function limitCodexReadToolResultText(text, maxBytes, options = {}) {
     return unpageableReadResult(value, budget, request.reason, options);
   }
 
-  const parsed = parseContiguousNumberedReadLines(value, request.offset);
+  const { source, annotation } = splitReadAnnotation(value);
+  const parsed = parseContiguousNumberedReadLines(source, request.offset);
   if (!parsed.valid) {
     return unpageableReadResult(value, budget, parsed.reason, options);
   }
@@ -1219,40 +1254,44 @@ function limitCodexReadToolResultText(text, maxBytes, options = {}) {
   }
 
   const returnedCount = parsed.records.length;
+  if (request.limit !== null && returnedCount > request.limit) {
+    return unpageableReadResult(value, budget, 'the numbered result exceeds the requested line limit', options);
+  }
   // Absence of a PARTIAL banner is not durable evidence of EOF: a future
   // Claude version could change or omit that companion system message. An
   // explicit line limit returning fewer records is the fail-closed EOF signal
   // available in the current textual contract.
   const explicitLimitReachedEof =
-    notice?.kind !== 'lines' && request.limit !== null && returnedCount < request.limit;
+    !annotation && notice?.kind !== 'lines' && request.limit !== null && returnedCount < request.limit;
   const sourceTotalLines = notice?.kind === 'lines'
     ? notice.total
     : explicitLimitReachedEof
       ? lastRecord.number
       : null;
-  const rawSourceComplete = explicitLimitReachedEof;
   let selected = null;
-  let body = '';
+  let bodyBytes = 0;
+  const ancillary = readAnnotationSection(annotation, budget);
+  const pageBudget = budget - byteLength(ancillary.text);
   for (let index = 0; index < parsed.records.length; index += 1) {
-    body = body ? `${body}\n${parsed.records[index].text}` : parsed.records[index].text;
+    bodyBytes += (index === 0 ? 0 : 1) + byteLength(parsed.records[index].text);
     const coveredEnd = parsed.records[index].number;
-    const sourceComplete = rawSourceComplete && index === parsed.records.length - 1;
+    const reachedEof = explicitLimitReachedEof && index === parsed.records.length - 1;
     const metadata = {
       path: request.filePath,
       covered_start: firstRecord.number,
       covered_end: coveredEnd,
       source_total_lines: sourceTotalLines,
-      next_offset: sourceComplete ? null : coveredEnd + 1,
-      next_limit: sourceComplete ? null : index + 1,
+      next_offset: reachedEof ? null : coveredEnd + 1,
+      next_limit: reachedEof ? null : index + 1,
       contiguous: true,
-      source_complete: sourceComplete,
+      reached_eof: reachedEof,
+      source_complete: reachedEof && firstRecord.number === 1,
     };
     const footer = renderCodexReadPageMetadata(metadata);
-    const output = `${body}\n\n${footer}`;
-    if (Number.isFinite(budget) && byteLength(output) > budget) {
+    if (bodyBytes + 2 + byteLength(footer) > pageBudget) {
       break;
     }
-    selected = { output, metadata, count: index + 1 };
+    selected = { footer, metadata, count: index + 1 };
   }
 
   if (!selected) {
@@ -1265,8 +1304,8 @@ function limitCodexReadToolResultText(text, maxBytes, options = {}) {
   }
 
   return {
-    text: selected.output,
-    truncated: selected.count < parsed.records.length,
+    text: `${parsed.records.slice(0, selected.count).map(record => record.text).join('\n')}\n\n${selected.footer}${ancillary.text}`,
+    truncated: selected.count < parsed.records.length || ancillary.truncated,
     originalBytes,
     originalTokenCount,
     totalLines,
@@ -1672,31 +1711,36 @@ function renderTranscriptBlock(block, options = {}) {
     }
     let text = renderToolResultContent(block.content, options);
     const replayToolCall = options.toolCallsById?.get(block.tool_use_id);
+    const header = `[tool_result ${block.tool_use_id || ''}${block.is_error ? ' error' : ''}]\n`;
     if (isReadToolName(replayToolCall?.tool) && !hasImage) {
-      const rawToolResult = {
-        text,
-        isError: block.is_error === true,
-        messageIndex: options.messageIndex,
-      };
       const readNotice = adjacentClaudeReadPartialNotice(
         options.requestBody,
         options.messageIndex,
         replayToolCall
       );
-      const prepared = prepareCodexToolResultPayload(
-        {
-          ...rawToolResult,
-          readNoticeStatus: readNotice.status,
-          readPartialNotice: readNotice.notice,
-          readNoticeError: readNotice.error,
-        },
-        replayToolCall,
-        Math.min(options.readInlineMaxBytes ?? Infinity, budget)
-      );
-      text = prepared.limitedToolResult.text;
+      const raw = {
+        text,
+        isError: block.is_error === true,
+        readNoticeStatus: readNotice.status,
+        readPartialNotice: readNotice.notice,
+        readNoticeError: readNotice.error,
+      };
+      const maxBytes = Math.min(options.readInlineMaxBytes ?? Infinity, budget);
+      const pageAt = (bytes) => prepareCodexToolResultPayload(raw, replayToolCall, bytes).limitedToolResult;
+      const page = pageAt(maxBytes);
+      text = page.text;
+      if (page.readCoverageVerified && options.captureReadPage) {
+        // Keep the raw result and its call/notice together until the final
+        // transcript budget is known. Never slice generated coverage claims.
+        options.captureReadPage((chars) => chars <= header.length
+          ? '[Read omitted]'.slice(0, chars)
+          : header + pageAt(Math.min(maxBytes, chars - header.length)).text);
+      }
+    } else if (!hasImage && Number.isFinite(budget)) {
+      text = limitCodexToolResultText(text, budget).text;
     }
     if (!hasImage) account(byteLength(text));
-    return `[tool_result ${block.tool_use_id || ''}${block.is_error ? ' error' : ''}]\n${text}`;
+    return header + text;
   }
 
   return '';
@@ -1718,31 +1762,50 @@ function recordTranscriptToolCalls(message, toolCallsById) {
   }
 }
 
-function transcriptToolCalls(requestBody, endMessageIndex = Number.POSITIVE_INFINITY) {
-  const toolCallsById = new Map();
-  const messages = Array.isArray(requestBody?.messages) ? requestBody.messages : [];
-  for (let index = 0; index < messages.length && index <= endMessageIndex; index += 1) {
-    recordTranscriptToolCalls(messages[index], toolCallsById);
-  }
-  return toolCallsById;
-}
-
 function renderMessageTranscript(message, options = {}) {
   if (message?.role === 'system') {
-    return '';
+    return null;
   }
 
-  const content = normalizeContentBlocks(message?.content, `${message?.role || 'message'} content`)
-    .map(function renderBlock(block) {
-      return renderTranscriptBlock(block, options);
-    })
-    .filter(Boolean)
-    .join('\n\n');
-  if (!content) {
-    return '';
+  const prefix = `[${message?.role || 'unknown'}]\n`;
+  const parts = [];
+  let afterToolOutput = false;
+  for (const block of normalizeContentBlocks(message?.content, `${message?.role || 'message'} content`)) {
+    let fitRead = null;
+    const text = renderTranscriptBlock(block, { ...options, captureReadPage: (fit) => { fitRead = fit; } });
+    if (!text) continue;
+    // A resumed transcript has no live RPC to mark the end of a tool
+    // result. Mark the transition back to the user's accompanying input.
+    const startsUserInput = afterToolOutput && block.type !== 'tool_result';
+    parts.push({ text: startsUserInput ? `[user]\n${text}` : text, fitRead });
+    afterToolOutput = message?.role === 'user' && block.type === 'tool_result';
   }
-
-  return `[${message.role || 'unknown'}]\n${content}`;
+  if (!parts.length) return null;
+  const join = (texts) => prefix + texts.join('\n\n');
+  const text = join(parts.map(part => part.text));
+  const result = { text, messageIndex: options.messageIndex, role: message?.role || 'unknown' };
+  const pages = parts.filter(part => part.fitRead);
+  if (pages.length) {
+    result.fit = (maxChars) => {
+      // Non-page text (including instructions and image markers) takes
+      // precedence. Only emit a footer generated for the lines that fit.
+      const fixedLength = text.length - pages.reduce((n, part) => n + part.text.length, 0);
+      let available = maxChars - fixedLength;
+      if (available <= 0) {
+        const withoutPages = join(parts.map(part => part.fitRead ? '[Read omitted; no source coverage]' : part.text));
+        return limitTextByCharBudget(withoutPages, maxChars);
+      }
+      let remainingPages = pages.length;
+      return join(parts.map(part => {
+        if (!part.fitRead) return part.text;
+        const share = Math.floor(available / remainingPages--);
+        const fitted = part.text.length <= share ? part.text : part.fitRead(share);
+        available -= fitted.length;
+        return fitted;
+      }));
+    };
+  }
+  return result;
 }
 
 function latestUserContentBlocks(requestBody, label = 'latest user message') {
@@ -1821,34 +1884,14 @@ function matchesContinuityAnchor(requestBody, anchor) {
 function renderLatestUserTranscriptInput(
   requestBody,
   maxTokens = Number.POSITIVE_INFINITY,
-  renderOptions = {}
+  renderOptions = {},
+  renderedMessages = renderedTranscriptMessages(requestBody, renderOptions)
 ) {
-  const messages = Array.isArray(requestBody?.messages) ? requestBody.messages : [];
-  const cappedImages = Number.isFinite(renderOptions.toolResultWindowMaxBytes) &&
-    latestUserContentBlocks(requestBody).some((b) => b?.type === 'tool_result' && hasImageResult(b.content));
-
-  for (let index = messages.length - 1; index >= 0; index -= 1) {
-    const message = messages[index];
-    if (message?.role !== 'user') {
-      continue;
-    }
-
-    const rendered = cappedImages
-      ? renderedTranscriptMessages(requestBody, renderOptions).find((entry) => entry.messageIndex === index)?.text
-      : renderMessageTranscript(message, {
-      ...renderOptions,
-      requestBody,
-      messageIndex: index,
-      toolCallsById:
-        renderOptions.toolCallsById || transcriptToolCalls(requestBody, index),
-    });
-    if (rendered) {
-      return limitTextByTokenBudget(rendered, maxTokens);
-    }
-
-    break;
+  const lastUser = requestBody.messages.findLastIndex(message => message?.role === 'user');
+  const entry = renderedMessages.find(item => item.messageIndex === lastUser);
+  if (entry) {
+    return fitTranscriptInputToBudget([entry], 0, maxTokens, renderOptions.images).text;
   }
-
   return limitTextByTokenBudget(extractLatestUserText(requestBody, renderOptions), maxTokens);
 }
 
@@ -1875,11 +1918,7 @@ function renderedTranscriptMessages(requestBody, renderOptions = {}) {
       continue;
     }
 
-    renderedMessages.push({
-      messageIndex: index,
-      role: message?.role || 'unknown',
-      text: rendered,
-    });
+    renderedMessages.push(rendered);
   }
 
   return renderedMessages;
@@ -1969,13 +2008,13 @@ function renderTranscriptInputWithSummary(
     const rendered = renderedMessages[index];
     const tokens = estimateTokensFromText(rendered) + (renderOptions.images?.tokens(rendered) || 0);
     if (usedTokens + tokens <= maxTokens) {
-      selected.unshift(rendered);
+      selected.unshift(renderedItems[index]);
       usedTokens += tokens;
       continue;
     }
 
     if (selected.length === 0) {
-      selected.unshift(limitTextByTokenBudget(rendered, maxTokens));
+      selected.unshift(renderedItems[index]);
       omittedCount = index;
     } else {
       omittedCount = index + 1;
@@ -1984,21 +2023,22 @@ function renderTranscriptInputWithSummary(
   }
 
   if (selected.length > 0) {
-    const text = fitTranscriptInputToBudget(selected, omittedCount, maxTokens);
+    const fitted = fitTranscriptInputToBudget(selected, omittedCount, maxTokens, renderOptions.images);
+    const text = fitted.text;
     return {
       text,
       summary: summarizeTurnInput(requestBody, text, {
         mode: 'transcript',
         maxTokens,
         renderedMessageCount: renderedMessages.length,
-        selectedMessageCount: selected.length,
-        omittedMessageCount: omittedCount,
+        selectedMessageCount: renderedItems.length - fitted.omittedCount,
+        omittedMessageCount: fitted.omittedCount,
         largestRenderedMessages,
       }),
     };
   }
 
-  const text = renderLatestUserTranscriptInput(requestBody, maxTokens, renderOptions);
+  const text = renderLatestUserTranscriptInput(requestBody, maxTokens, renderOptions, renderedItems);
   return {
     text,
     summary: summarizeLatestTurnInput(
@@ -2011,54 +2051,99 @@ function renderTranscriptInputWithSummary(
   };
 }
 
-function fitTranscriptInputToBudget(selectedMessages, omittedCount, maxTokens) {
-  if (omittedCount <= 0) {
-    return limitTextByTokenBudget(joinTextParts(selectedMessages), maxTokens);
+function fitTranscriptInputToBudget(selected, omittedCount, maxTokens, images) {
+  for (let start = 0; start < selected.length; start++, omittedCount++) {
+    const prefix = omittedCount ? `${TRANSCRIPT_OMISSION_NOTICE}: ${omittedCount} message(s).\n\n` : '';
+    const text = prefix + joinTextParts(selected.slice(start).map(entry => entry.text));
+    const imageTokens = images?.tokens(text) || 0;
+    const maxChars = Math.max(0, (maxTokens - imageTokens) * ESTIMATE_CHARS_PER_TOKEN);
+    if (text.length <= maxChars) return { text, omittedCount };
+    if (start === selected.length - 1) {
+      if (imageTokens && imageTokens >= maxTokens) {
+        throw new GatewayError(413, 'invalid_request_error', 'Inline images exceed the configured Codex input budget');
+      }
+      const entry = selected[start];
+      const available = Math.max(0, maxChars - prefix.length);
+      return {
+        text: prefix.slice(0, maxChars) + (entry.fit
+          ? entry.fit(available)
+          : limitTextByCharBudget(entry.text, available)),
+        omittedCount,
+      };
+    }
   }
-
-  const notice = `${TRANSCRIPT_OMISSION_NOTICE}: ${omittedCount} message(s).`;
-  const maxChars = maxCharsForTokenBudget(maxTokens);
-  if (!Number.isFinite(maxChars)) {
-    return joinTextParts([notice, ...selectedMessages]);
-  }
-
-  const remainingMessages = selectedMessages.slice();
-  let input = joinTextParts([notice, ...remainingMessages]);
-  while (remainingMessages.length > 1 && input.length > maxChars) {
-    remainingMessages.shift();
-    input = joinTextParts([notice, ...remainingMessages]);
-  }
-
-  if (input.length <= maxChars) {
-    return input;
-  }
-
-  const latestMessage = remainingMessages.at(-1) || '';
-  const prefix = `${notice}\n\n`;
-  if (prefix.length >= maxChars) {
-    return prefix.slice(0, maxChars);
-  }
-
-  return `${prefix}${latestMessage.slice(-(maxChars - prefix.length))}`;
-}
-
-function renderTranscriptInput(
-  requestBody,
-  maxTokens = Number.POSITIVE_INFINITY,
-  renderOptions = {}
-) {
-  return renderTranscriptInputWithSummary(requestBody, maxTokens, renderOptions).text;
+  return { text: '', omittedCount };
 }
 
 function isCodexContextWindowError(error) {
-  return (
-    error?.codexErrorType === 'contextWindowExceeded' ||
-    CODEX_CONTEXT_WINDOW_ERROR_PATTERN.test(error?.message || '')
-  );
+  // Older app-servers supplied only error text. A typed upstream failure is
+  // authoritative even when its detail happens to mention the context window.
+  return error?.codexErrorType
+    ? error.codexErrorType === 'contextWindowExceeded'
+    : CODEX_CONTEXT_WINDOW_ERROR_PATTERN.test(error?.message || '');
 }
 
-function isCodexAutocompactThrashText(text) {
-  return CODEX_AUTOCOMPACT_THRASH_PATTERN.test(String(text || ''));
+const POST_TOOL_NOTICE = 'The tool may already have run. Check its effects before starting a new request; no tool was replayed.';
+const MAX_DYNAMIC_CALLS_PER_TURN = 256;
+
+function postToolFailure(error) {
+  if (error?.unsafeToReplayToolTurn) return error;
+  const overflow = isCodexContextWindowError(error);
+  const failure = copyCodexErrorMetadata(new GatewayError(
+    overflow ? 400 : (error?.status || 502),
+    overflow ? 'invalid_request_error' : (error?.type || 'api_error'),
+    `${error?.message || 'The Codex turn ended.'} ${POST_TOOL_NOTICE}`
+  ), error);
+  failure.unsafeToReplayToolTurn = true;
+  failure.retryable = false;
+  return failure;
+}
+
+// Independent of the session pool: a correction can evict a failed thread
+// without making a delayed retry of its tool-emitting request safe. No raw
+// request, tool id, provider message, result, or error detail is retained.
+class FailedToolTurnCache {
+  constructor() {
+    this.identities = new Map();
+  }
+
+  remember(identity, fingerprints, calls, failure) {
+    const now = Date.now();
+    const expires = now + 30 * 60_000;
+    let entries = this.identities.get(identity);
+    if (!entries) entries = new Map();
+    this.identities.delete(identity);
+    this.identities.set(identity, entries);
+    if (this.identities.size > 256) this.identities.delete(this.identities.keys().next().value);
+    const record = { expires, status: failure.status, type: failure.type };
+    const put = (key) => {
+      // Later socket shutdown or pending-tool expiry must not replace the
+      // original status or prolong the idempotency interval for this key.
+      if ((entries.get(key)?.expires || 0) > now) return;
+      entries.delete(key);
+      entries.set(key, record);
+      if (entries.size > 1024) entries.delete(entries.keys().next().value);
+    };
+    for (const call of calls) put('call:' + stableDigest(call));
+    for (const fingerprint of fingerprints) put('request:' + fingerprint);
+  }
+
+  rejectReplay(identity, fingerprint, calls) {
+    const entries = this.identities.get(identity);
+    if (!entries) return;
+    const now = Date.now();
+    const check = (key) => {
+      const record = entries.get(key);
+      if (!record) return;
+      if (record.expires <= now) { entries.delete(key); return; }
+      const failure = new GatewayError(record.status, record.type, POST_TOOL_NOTICE);
+      failure.unsafeToReplayToolTurn = true;
+      failure.retryable = false;
+      throw failure;
+    };
+    check('request:' + fingerprint);
+    for (const call of calls) check('call:' + stableDigest(call));
+  }
 }
 
 function isPossibleCodexContextWindowError(error) {
@@ -2508,6 +2593,9 @@ function traceLog(tracer, event, details = {}) {
 }
 
 function validateCodexRequestControls(requestBody) {
+  rejectInlineToolChanges(requestBody.messages);
+  if (requestBody.compaction !== undefined) rejectCodexCompaction();
+  codexOutputSchema(requestBody);
   const tools = effectiveCodexTools(requestBody);
   if (tools.some(tool => tool?.name === 'DeferredToolPlaceholder' && tool.defer_loading === true)) {
     // Claude 2.1.305+ recognizes this error and can resend the actual schemas.
@@ -2530,16 +2618,31 @@ function extractToolResultIds(requestBody) {
 
 function validateCodexContentBlocks(requestBody) {
   const messages = Array.isArray(requestBody?.messages) ? requestBody.messages : [];
-  for (const message of messages) {
+  for (const [index, message] of messages.entries()) {
     const blocks = normalizeContentBlocks(
       message?.content,
       `${message?.role || 'message'} content`
     );
+    if (message?.role === 'system') {
+      const user = messages[index - 1];
+      const assistant = messages[index - 2];
+      const readCalls = assistant?.role === 'assistant' && Array.isArray(assistant.content)
+        ? assistant.content.filter(b => b?.type === 'tool_use' && b.name === 'Read').map(b => b.id) : [];
+      const afterRead = user?.role === 'user' && Array.isArray(user.content) &&
+        user.content.some(b => b?.type === 'tool_result' && readCalls.includes(b.tool_use_id));
+      validateCodexSystemMessage(blocks, line => afterRead && Boolean(parseClaudeReadPartialNotice(line)));
+      continue;
+    }
     for (const block of blocks) {
-      if (block?.type === 'document') {
+      if (block?.type === 'compaction') {
+        rejectCodexCompaction();
+      } else if (block?.type === 'document') {
         rejectCodexDocumentAttachment();
       } else if (block?.type === 'image') {
         codexImageUrl(block);
+      } else if (!['text', 'tool_result', 'tool_use', 'thinking', 'redacted_thinking'].includes(block?.type)) {
+        throw new GatewayError(400, 'invalid_request_error',
+          `Codex cannot represent ${String(block?.type)} in a ${message?.role} message; use the native Anthropic route or supply text.`);
       }
     }
   }
@@ -3024,6 +3127,9 @@ class CodexGatewaySession {
     this.pendingToolCall = null;
     this.queuedToolCalls = [];
     this.seenToolCallIds = new Set();
+    this.toolBoundaryFingerprints = new Set();
+    this.failedToolTurns = options.failedToolTurns;
+    this.toolTurnFailed = false;
     this.activeBoundary = null;
     this.interBoundaryListeners = null;
     this.routingReservation = null;
@@ -3289,11 +3395,11 @@ class CodexGatewaySession {
       });
       return true;
     }
-    if ((!fromQueue && this.seenToolCallIds.has(params.callId)) ||
+    if ((!fromQueue && (this.seenToolCallIds.has(params.callId) || this.seenToolCallIds.size >= MAX_DYNAMIC_CALLS_PER_TURN)) ||
         (this.pendingToolCall && this.queuedToolCalls.length >= MAX_PENDING_INBOUND_EVENTS)) {
       this.connection.send({
         id: message.id,
-        error: { code: -32602, message: 'Duplicate tool call id or too many pending tool calls' },
+        error: { code: -32602, message: 'Duplicate tool call id or too many tool calls on this turn' },
       });
       return true;
     }
@@ -3323,6 +3429,17 @@ class CodexGatewaySession {
     this.connection.off('error', listeners.error);
   }
 
+  fenceFailedToolTurn(error, fingerprint = this.activeBoundary?.requestFingerprint) {
+    // An RPC merely queued by Codex has not been exposed to Claude. No tool
+    // could have run until at least one tool_use boundary was delivered.
+    if (!this.toolBoundaryFingerprints.size) return error;
+    this.toolTurnFailed = true;
+    if (fingerprint) this.toolBoundaryFingerprints.add(fingerprint);
+    const failure = postToolFailure(error);
+    this.failedToolTurns?.remember(this.identityKey, this.toolBoundaryFingerprints, this.seenToolCallIds, failure);
+    return failure;
+  }
+
   captureInterBoundaryEvents(turnId, usageBaseline, tracer = null) {
     this.stopInterBoundaryCapture();
     const notification = (message) => {
@@ -3336,6 +3453,9 @@ class CodexGatewaySession {
           // request fingerprint until the normal pending timeout: retries must
           // fail on this turn, not replay the tool or open a fresh thread.
           pending.ended = true;
+          const turnError = finalError ? message.params.error : message.params.turn.error;
+          this.fenceFailedToolTurn(turnError ? codexTurnGatewayError(turnError) :
+            new GatewayError(400, 'invalid_request_error', 'The Codex turn ended while Claude was handling its tool call.'));
           const queued = this.queuedToolCalls.splice(0);
           traceLog(tracer || this.tracer, 'codex.tool_call.turn_ended', {
             turn_id: turnId, pending_call_id: pending.callId, discarded_calls: queued.length,
@@ -3397,8 +3517,8 @@ class CodexGatewaySession {
     const maxTokens = this.bootstrapInputMaxTokens();
     const mode = this.initialInputMode();
     if (mode === 'latest') {
-      const text = renderLatestUserTranscriptInput(requestBody, maxTokens, renderOptions);
       const renderedMessages = renderedTranscriptMessages(requestBody, renderOptions);
+      const text = renderLatestUserTranscriptInput(requestBody, maxTokens, renderOptions, renderedMessages);
       return {
         text,
         summary: summarizeLatestTurnInput(requestBody, text, maxTokens, renderedMessages),
@@ -3536,10 +3656,14 @@ class CodexGatewaySession {
         : null,
     });
     this.seenToolCallIds.clear();
+    this.toolBoundaryFingerprints.clear();
+    this.toolTurnFailed = false;
+    const outputSchema = codexOutputSchema(requestBody);
     const result = await this.connection.request('turn/start', {
       threadId: this.threadId,
       input: images.input(preparedInput.text, latestUserContentBlocks(requestBody)),
       effort: mapReasoningEffort(this.route.reasoningEffort),
+      ...(outputSchema === null ? {} : { outputSchema }),
     });
 
     const turnId = result.turn?.id || null;
@@ -3547,12 +3671,19 @@ class CodexGatewaySession {
       throw new GatewayError(502, 'api_error', 'Codex app-server did not return a turn id');
     }
 
+    this.activeOutputSchema = outputSchema;
     return turnId;
   }
 
-  async continuePendingToolCall(requestBody, requestTracer = null) {
+  async continuePendingToolCall(requestBody, requestTracer = null, signal = null) {
     if (!this.pendingToolCall) {
       throw new GatewayError(500, 'api_error', 'no pending Codex tool call exists');
+    }
+    validatePendingOutputSchema(this.activeOutputSchema ?? null, requestBody);
+    const pending = this.pendingToolCall;
+    const steer = pendingUserSteer(latestUserContentBlocks(requestBody), pending.callId);
+    if (pending.steering) {
+      throw new GatewayError(409, 'invalid_request_error', 'A continuation for this tool result is already being applied.');
     }
 
     const toolResultMaxBytes = codexToolResultMaxBytes(this.config);
@@ -3584,6 +3715,29 @@ class CodexGatewaySession {
       text: finalToolResultText,
       isError: rawToolResult.isError || limitedToolResult.isError === true,
     };
+    if (steer.length) {
+      // Queue user input with its own role while the dynamic-tool future is
+      // blocked. Releasing the tool first would race the next inference.
+      // The expected turn ID prevents steering a replacement turn.
+      signal?.throwIfAborted();
+      pending.steering = true;
+      try {
+        const accepted = await this.connection.request('turn/steer', {
+          threadId: this.threadId, expectedTurnId: pending.turnId, input: steer,
+        });
+        if (accepted?.turnId !== pending.turnId || signal?.aborted ||
+            this.pendingToolCall !== pending || pending.ended || this.disposed) {
+          throw new Error('the pending turn changed');
+        }
+      } catch {
+        // A lost acknowledgement makes the fate of the steer ambiguous. Do
+        // not release the tool or invite an automatic replay of its effects.
+        pending.ended = true;
+        throw this.fenceFailedToolTurn(new GatewayError(400, 'invalid_request_error',
+          'Codex could not acknowledge the user input accompanying this tool result. The result was not sent; do not rerun the tool. Start a new request with the tool outcome and the user input.'),
+          requestFingerprint(requestBody));
+      }
+    }
     const resultBytes = limitedToolResult.bytes ?? byteLength(toolResult.text);
     this.toolResultWindowBytes += resultBytes;
     const tracer = this.scopedTracer(requestTracer);
@@ -3616,6 +3770,7 @@ class CodexGatewaySession {
       read_sanitization: readSanitizationTrace(this.pendingToolCall.readSanitization),
       is_error: toolResult.isError,
     });
+    signal?.throwIfAborted();
     this.stopInterBoundaryCapture();
     this.connection.send({
       id: this.pendingToolCall.requestId,
@@ -3692,7 +3847,7 @@ class CodexGatewaySession {
     };
   }
 
-  async advanceBoundary(requestBody, requestTracer = null) {
+  async advanceBoundary(requestBody, requestTracer = null, signal = null) {
     validateCodexRequestControls(requestBody);
     const resolution = this.resolveAdvanceMode(requestBody);
 
@@ -3704,7 +3859,7 @@ class CodexGatewaySession {
     }
 
     if (resolution.mode === 'continue_tool_result') {
-      return this.continuePendingToolCall(requestBody, requestTracer);
+      return this.continuePendingToolCall(requestBody, requestTracer, signal);
     }
 
     const boundary = createBoundary(null, requestBody, this.latestTotalUsage);
@@ -3725,8 +3880,8 @@ class CodexGatewaySession {
     }
   }
 
-  async advance(requestBody, requestTracer = null) {
-    const boundary = await this.advanceBoundary(requestBody, requestTracer);
+  async advance(requestBody, requestTracer = null, signal = null) {
+    const boundary = await this.advanceBoundary(requestBody, requestTracer, signal);
     return boundary.done;
   }
 
@@ -3870,6 +4025,7 @@ class CodexGatewaySession {
         return;
       }
 
+      error = this.fenceFailedToolTurn(error, boundary.requestFingerprint);
       cleanup();
       boundary.finished = true;
       boundary.error = error;
@@ -3885,19 +4041,13 @@ class CodexGatewaySession {
         return;
       }
 
-      if (outcome.type === 'final' && isCodexAutocompactThrashText(outcome.text)) {
-        traceLog(tracer, 'codex.boundary.autocompact_thrash_detected', {
-          turn_id: turnId,
-          output_chars: outcome.text.length,
-        });
-        failBoundary(new GatewayError(502, 'api_error', outcome.text));
-        return;
-      }
-
       cleanup();
       emitSelectedAgentTextSuffix();
       if (outcome.type === 'tool_use') {
+        this.toolBoundaryFingerprints.add(boundary.requestFingerprint);
         this.captureInterBoundaryEvents(turnId, boundary.usageBaseline, tracer);
+      } else {
+        this.toolBoundaryFingerprints.clear();
       }
       boundary.finished = true;
       if (!boundary.queuedToolCall) populateEstimatedUsage(boundary, requestBody, outcome);
@@ -4166,8 +4316,8 @@ class CodexGatewaySession {
     return boundary;
   }
 
-  async stream(requestBody, onEvent, requestTracer = null) {
-    const boundary = await this.advanceBoundary(requestBody, requestTracer);
+  async stream(requestBody, onEvent, requestTracer = null, signal = null) {
+    const boundary = await this.advanceBoundary(requestBody, requestTracer, signal);
     let eventFailure = null;
     let eventChain = Promise.resolve();
     let notifyEventFailure = null;
@@ -4231,6 +4381,15 @@ class CodexGatewaySession {
   }
 
   async interrupt(reason = null) {
+    if (this.pendingToolCall?.steering) {
+      // The prior tool_use HTTP boundary is finished, but its JSON-RPC tool
+      // request and the steer are both still live. Fence before any await;
+      // even an acknowledgement racing transport shutdown must not release it.
+      this.pendingToolCall.ended = true;
+      this.fenceFailedToolTurn(new GatewayError(409, 'invalid_request_error',
+        'A correction was cancelled while Codex was acknowledging it.'));
+      return false;
+    }
     const boundary = this.activeBoundary;
     if (!boundary || boundary.finished) {
       return true;
@@ -4276,6 +4435,17 @@ class CodexGatewaySession {
       return false;
     }
 
+    // A subscribed thread remains loaded in app-server even after interruption.
+    // Only reuse this process if the old subscription is gone; otherwise the
+    // caller retires the whole connection (including any outstanding RPC).
+    const retired = await withTimeout(
+      this.connection.request('thread/unsubscribe', { threadId: this.threadId })
+        .then(result => ['unsubscribed', 'notSubscribed', 'notLoaded'].includes(result?.status), () => false),
+      CODEX_INTERRUPT_TIMEOUT_MS,
+      false
+    );
+    if (!retired) return false;
+
     // Claude may discard a partially streamed turn after cancellation while
     // Codex retains it in thread history. Keep the warm app-server process,
     // but start the next request on a fresh Codex thread bootstrapped from
@@ -4287,6 +4457,7 @@ class CodexGatewaySession {
     this.pendingToolCall = null;
     this.queuedToolCalls = [];
     this.activeBoundary = null;
+    this.toolBoundaryFingerprints.clear();
     this.transcriptAnchor = null;
     this.bootstrapMode = 'transcript';
     this.toolResultWindowBytes = 0;
@@ -4316,6 +4487,7 @@ export class CodexSessionManager {
   constructor(config, options = {}) {
     this.config = config;
     this.sessions = new Map();
+    this.failedToolTurns = new FailedToolTurnCache();
     this.pendingSessionClosures = new Set();
     this.tracer = options.tracer || null;
     this.learnedContextWindows = new Map();
@@ -4336,6 +4508,7 @@ export class CodexSessionManager {
               }) || null,
               {
                 contextWindows: this.learnedContextWindows,
+                failedToolTurns: this.failedToolTurns,
                 ...sessionOptions,
               }
             );
@@ -4402,6 +4575,8 @@ export class CodexSessionManager {
     const toolResultIds = extractToolResultIds(requestBody);
     const identityEntries = this.identityEntries(identityKey);
     const familyEntries = this.familyEntries(baseSessionKey);
+
+    this.failedToolTurns.rejectReplay(identityKey, requestIdFingerprint, toolResultIds);
 
     for (const [sessionKey, session] of identityEntries) {
       if (session.pendingToolCall && toolResultIds.has(session.pendingToolCall.callId)) {
@@ -4504,7 +4679,7 @@ export class CodexSessionManager {
       session &&
       selection.selectionReason === 'canonical' &&
       session.threadId &&
-      session.isTranscriptContinuous?.(requestBody) === false
+      (session.toolTurnFailed || session.isTranscriptContinuous?.(requestBody) === false)
     ) {
       const divergedSession = session;
       traceLog(requestTracer || this.tracer, 'codex.session.transcript_diverged', {
@@ -4573,7 +4748,7 @@ export class CodexSessionManager {
       route,
       requestTracer,
       run(session) {
-        return session.advance(requestBody, requestTracer);
+        return session.advance(requestBody, requestTracer, req.abortSignal);
       },
     });
   }
@@ -4594,7 +4769,7 @@ export class CodexSessionManager {
         return forwardedEventCount === 0;
       },
       run(session) {
-        return session.stream(requestBody, retryAwareOnEvent, requestTracer);
+        return session.stream(requestBody, retryAwareOnEvent, requestTracer, req.abortSignal);
       },
     });
   }
@@ -4659,7 +4834,7 @@ export class CodexSessionManager {
   }
 
   describeContextOverflowError(error, options) {
-    if (!isCodexContextWindowError(error)) {
+    if (error?.unsafeToReplayToolTurn || !isCodexContextWindowError(error)) {
       return error;
     }
 
@@ -4713,7 +4888,7 @@ export class CodexSessionManager {
   }
 
   canRecoverFromContextOverflow(error, options) {
-    if (!isCodexContextWindowError(error)) {
+    if (error?.unsafeToReplayToolTurn || !isCodexContextWindowError(error)) {
       return false;
     }
 
@@ -4760,13 +4935,17 @@ export class CodexSessionManager {
 
     const manager = this;
     session.connection.once('error', function evictErroredSession(error) {
+      if (!session.disposed) session.fenceFailedToolTurn?.(error);
       void manager.evictSession(sessionKey, session, error, 'codex.session.evicted');
     });
   }
 
   isEvictableFailure(error) {
     if (error instanceof GatewayError) {
-      return error.status >= 500 || isCodexContextWindowError(error);
+      // Evict a pre-tool retryable failure so a later *client* retry creates
+      // a fresh turn. Never retry the model automatically on rate limits.
+      return error.unsafeToReplayToolTurn === true || error.status >= 500 || isCodexContextWindowError(error) ||
+        (error.status === 429 && error.codexErrorType === 'rateLimitExceeded' && error.retryable === true);
     }
 
     return true;
@@ -4886,6 +5065,9 @@ export class CodexSessionManager {
     try {
       return await this.runWithAbort(session, run, signal, abortSessionOnSignal);
     } catch (error) {
+      if (session.connection?.closed && !signal?.aborted) {
+        error = session.fenceFailedToolTurn?.(error) || error;
+      }
       if (this.isEvictableFailure(error)) {
         await this.evictSession(session.sessionKey, session, error, 'codex.session.evicted');
       }
@@ -5025,22 +5207,16 @@ export class CodexSessionManager {
       return;
     }
 
+    const failure = reason === 'pending_tool_timeout'
+      ? new GatewayError(504, 'api_error', `Codex session expired while waiting for tool_result after ${this.pendingToolTimeoutMs()}ms`)
+      : null;
+    if (failure) session.fenceFailedToolTurn?.(failure);
     this.sessions.delete(sessionKey);
     traceLog(this.tracer, 'codex.session.expired', {
       session_key: sessionKey,
       reason,
     });
-    await this.trackSessionClosure(
-      session.close(
-        reason === 'pending_tool_timeout'
-          ? new GatewayError(
-              504,
-              'api_error',
-              `Codex session expired while waiting for tool_result after ${this.pendingToolTimeoutMs()}ms`
-            )
-          : null
-      )
-    );
+    await this.trackSessionClosure(session.close(failure));
   }
 
   async evictExcessIdleSessions(protectedSession = null) {

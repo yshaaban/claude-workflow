@@ -313,6 +313,33 @@ test('Read metadata stays transient across live continuity and authoritative rep
     assert.equal(replayInput.includes('[Truncated: PARTIAL view'), false);
     assert.equal(replayInput.includes('<total_tokens>'), false);
     assert.equal(replayThread.message.params.developerInstructions, durableSystem);
+
+    // Once the live session is gone, a smaller bootstrap budget must not
+    // turn a verified page into a head/tail preview with its old footer.
+    await manager.processRequest(request('second-evictor'), {
+      ...initialBody, messages: [{ role: 'user', content: 'EVICTOR' }],
+    }, route());
+    manager.config.codex.inputMaxTokens = 300;
+    const boundedHistory = readMessages(rawResult).slice(0, 3);
+    boundedHistory[1].content[0].input.limit = 12_002;
+    boundedHistory[2].content.push({ type: 'text', text: 'AFTER_EVICTION_TIGHT' });
+    const tight = await manager.processRequest(request('read-session'), {
+      ...initialBody, messages: boundedHistory,
+    }, route());
+    assert.equal(tight.text, 'AFTER_EVICTION_DONE');
+    const tightTurn = (await readJsonLines(logPath)).filter(entry => entry.event === 'turn_start').at(-1);
+    assert.notEqual(tightTurn.pid, replayTurn.pid);
+    const tightInput = tightTurn.message.params.input[0].text;
+    assert.ok(tightInput.length <= 900);
+    const page = JSON.parse(tightInput.split('[Codex Read page metadata]\n')[1].split('\n')[0]);
+    assert.equal(page.covered_start, 1);
+    assert.equal(page.source_total_lines, 12_001);
+    assert.ok(page.covered_end > 0 && page.covered_end < 12_001);
+    assert.equal(page.next_offset, page.covered_end + 1);
+    assert.equal(page.reached_eof, false);
+    assert.equal(page.source_complete, false);
+    assert.deepEqual(tightInput.split('\n').filter(line => /^\d+\t/u.test(line)),
+      rawResult.split('\n').slice(0, page.covered_end));
   } finally {
     await manager?.close();
     await fs.rm(tempDir, { recursive: true, force: true });
